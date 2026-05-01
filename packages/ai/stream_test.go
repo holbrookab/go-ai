@@ -1,0 +1,285 @@
+package ai
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestStreamTextRunsToolLoop(t *testing.T) {
+	calls := 0
+	model := &sequenceModel{stream: func(opts LanguageModelCallOptions) (*LanguageModelStreamResult, error) {
+		calls++
+		ch := make(chan StreamPart, 8)
+		if calls == 1 {
+			ch <- StreamPart{Type: "tool-call", ToolCallID: "call-1", ToolName: "weather", ToolInput: `{"city":"NYC"}`}
+			ch <- StreamPart{Type: "finish", FinishReason: FinishReason{Unified: FinishToolCalls}}
+		} else {
+			if len(opts.Prompt) == 0 || opts.Prompt[len(opts.Prompt)-1].Role != RoleTool {
+				t.Fatalf("second stream call should include tool result, got %#v", opts.Prompt)
+			}
+			ch <- StreamPart{Type: "text-delta", TextDelta: "sunny"}
+			ch <- StreamPart{Type: "finish", FinishReason: FinishReason{Unified: FinishStop}}
+		}
+		close(ch)
+		return &LanguageModelStreamResult{Stream: ch}, nil
+	}}
+	result, err := StreamText(context.Background(), StreamTextOptions{
+		GenerateTextOptions: GenerateTextOptions{
+			Model:    model,
+			Prompt:   "weather?",
+			StopWhen: []StopCondition{LoopFinished()},
+			Tools: map[string]Tool{
+				"weather": {
+					InputSchema: map[string]any{"type": "object"},
+					Execute: func(ctx context.Context, call ToolCall, opts ToolExecutionOptions) (any, error) {
+						return "sunny", nil
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StreamText failed: %v", err)
+	}
+	var text string
+	var toolResultSeen bool
+	for part := range result.Stream {
+		if part.Type == "text-delta" {
+			text += part.TextDelta
+		}
+		if part.Type == "tool-result" {
+			toolResultSeen = true
+		}
+	}
+	if text != "sunny" {
+		t.Fatalf("expected sunny, got %q", text)
+	}
+	if !toolResultSeen {
+		t.Fatalf("expected streamed tool result")
+	}
+	if len(result.Steps) != 2 {
+		t.Fatalf("expected 2 steps, got %d", len(result.Steps))
+	}
+}
+
+func TestStreamTextRepairsUnavailableToolCall(t *testing.T) {
+	calls := 0
+	model := &sequenceModel{stream: func(opts LanguageModelCallOptions) (*LanguageModelStreamResult, error) {
+		calls++
+		ch := make(chan StreamPart, 8)
+		if calls == 1 {
+			ch <- StreamPart{Type: "tool-call", ToolCallID: "call-1", ToolName: "whether", ToolInput: `{"city":"NYC"}`}
+			ch <- StreamPart{Type: "finish", FinishReason: FinishReason{Unified: FinishToolCalls}}
+		} else {
+			ch <- StreamPart{Type: "text-delta", TextDelta: "sunny"}
+			ch <- StreamPart{Type: "finish", FinishReason: FinishReason{Unified: FinishStop}}
+		}
+		close(ch)
+		return &LanguageModelStreamResult{Stream: ch}, nil
+	}}
+
+	result, err := StreamText(context.Background(), StreamTextOptions{
+		GenerateTextOptions: GenerateTextOptions{
+			Model:    model,
+			Prompt:   "weather?",
+			StopWhen: []StopCondition{LoopFinished()},
+			Tools: map[string]Tool{"weather": {
+				Execute: func(_ context.Context, call ToolCall, _ ToolExecutionOptions) (any, error) {
+					if call.ToolName != "weather" {
+						t.Fatalf("expected repaired tool name, got %q", call.ToolName)
+					}
+					return "sunny", nil
+				},
+			}},
+			RepairToolCall: func(_ context.Context, opts ToolCallRepairOptions) (*ToolCallPart, error) {
+				if !IsNoSuchToolError(opts.Error) {
+					t.Fatalf("expected no such tool error, got %v", opts.Error)
+				}
+				return &ToolCallPart{ToolCallID: opts.ToolCall.ToolCallID, ToolName: "weather", InputRaw: opts.ToolCall.InputRaw}, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StreamText failed: %v", err)
+	}
+
+	var toolCallName string
+	var text string
+	for part := range result.Stream {
+		if part.Type == "tool-call" {
+			toolCallName = part.ToolName
+		}
+		if part.Type == "text-delta" {
+			text += part.TextDelta
+		}
+	}
+	if toolCallName != "weather" {
+		t.Fatalf("expected repaired tool-call chunk, got %q", toolCallName)
+	}
+	if text != "sunny" {
+		t.Fatalf("expected sunny, got %q", text)
+	}
+	if len(result.Steps) != 2 || len(result.Steps[0].ToolResults) != 1 {
+		t.Fatalf("expected repaired stream tool execution, got %#v", result.Steps)
+	}
+}
+
+func TestStreamTextAppliesTransformsToCanonicalText(t *testing.T) {
+	model := &sequenceModel{stream: func(opts LanguageModelCallOptions) (*LanguageModelStreamResult, error) {
+		ch := make(chan StreamPart, 4)
+		ch <- StreamPart{Type: "text-delta", TextDelta: "Hello"}
+		ch <- StreamPart{Type: "text-delta", TextDelta: ", world"}
+		ch <- StreamPart{Type: "finish", FinishReason: FinishReason{Unified: FinishStop, Raw: "stop"}}
+		close(ch)
+		return &LanguageModelStreamResult{Stream: ch}, nil
+	}}
+
+	upper := StreamTransform(func(ctx context.Context, in <-chan StreamPart, _ StreamTransformOptions) <-chan StreamPart {
+		out := make(chan StreamPart)
+		go func() {
+			defer close(out)
+			for part := range in {
+				if part.Type == "text-delta" {
+					part.TextDelta = strings.ToUpper(part.TextDelta)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case out <- part:
+				}
+			}
+		}()
+		return out
+	})
+
+	result, err := StreamText(context.Background(), StreamTextOptions{
+		GenerateTextOptions: GenerateTextOptions{
+			Model:  model,
+			Prompt: "say hello",
+		},
+		Transforms: []StreamTransform{upper},
+	})
+	if err != nil {
+		t.Fatalf("StreamText failed: %v", err)
+	}
+
+	var streamed string
+	for part := range result.Stream {
+		if part.Type == "text-delta" {
+			streamed += part.TextDelta
+		}
+	}
+	if streamed != "HELLO, WORLD" {
+		t.Fatalf("streamed text = %q", streamed)
+	}
+	if result.Text != "HELLO, WORLD" {
+		t.Fatalf("result text = %q", result.Text)
+	}
+	textPart, ok := result.Response.Messages[0].Content[0].(TextPart)
+	if !ok || textPart.Text != "HELLO, WORLD" {
+		t.Fatalf("response messages = %#v", result.Response.Messages)
+	}
+}
+
+func TestStreamTextTransformsToolCallInputBeforeParsing(t *testing.T) {
+	calls := 0
+	model := &sequenceModel{stream: func(opts LanguageModelCallOptions) (*LanguageModelStreamResult, error) {
+		calls++
+		ch := make(chan StreamPart, 4)
+		if calls == 1 {
+			ch <- StreamPart{Type: "tool-call", ToolCallID: "call-1", ToolName: "weather", ToolInput: `{"city":"nyc"}`}
+			ch <- StreamPart{Type: "finish", FinishReason: FinishReason{Unified: FinishToolCalls}}
+		} else {
+			ch <- StreamPart{Type: "text-delta", TextDelta: "done"}
+			ch <- StreamPart{Type: "finish", FinishReason: FinishReason{Unified: FinishStop}}
+		}
+		close(ch)
+		return &LanguageModelStreamResult{Stream: ch}, nil
+	}}
+
+	normalizeCity := StreamTransform(func(ctx context.Context, in <-chan StreamPart, _ StreamTransformOptions) <-chan StreamPart {
+		out := make(chan StreamPart)
+		go func() {
+			defer close(out)
+			for part := range in {
+				if part.Type == "tool-call" {
+					part.ToolInput = strings.ReplaceAll(part.ToolInput, `"nyc"`, `"NYC"`)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case out <- part:
+				}
+			}
+		}()
+		return out
+	})
+
+	result, err := StreamText(context.Background(), StreamTextOptions{
+		GenerateTextOptions: GenerateTextOptions{
+			Model:    model,
+			Prompt:   "weather?",
+			StopWhen: []StopCondition{LoopFinished()},
+			Tools: map[string]Tool{"weather": {
+				ValidateInput: func(input any) error {
+					if input.(map[string]any)["city"] != "NYC" {
+						t.Fatalf("expected transformed input, got %#v", input)
+					}
+					return nil
+				},
+				Execute: func(_ context.Context, call ToolCall, _ ToolExecutionOptions) (any, error) {
+					if call.Input.(map[string]any)["city"] != "NYC" {
+						t.Fatalf("expected transformed execution input, got %#v", call.Input)
+					}
+					return "ok", nil
+				},
+			}},
+		},
+		Transforms: []StreamTransform{normalizeCity},
+	})
+	if err != nil {
+		t.Fatalf("StreamText failed: %v", err)
+	}
+	for range result.Stream {
+	}
+	if result.Steps[0].ToolCalls[0].Input.(map[string]any)["city"] != "NYC" {
+		t.Fatalf("tool calls = %#v", result.Steps[0].ToolCalls)
+	}
+}
+
+func TestSmoothStreamChunksTextByWord(t *testing.T) {
+	model := &sequenceModel{stream: func(opts LanguageModelCallOptions) (*LanguageModelStreamResult, error) {
+		ch := make(chan StreamPart, 4)
+		ch <- StreamPart{Type: "text-delta", ID: "text-1", TextDelta: "Hello, world!"}
+		ch <- StreamPart{Type: "finish", FinishReason: FinishReason{Unified: FinishStop}}
+		close(ch)
+		return &LanguageModelStreamResult{Stream: ch}, nil
+	}}
+
+	noDelay := time.Duration(0)
+	result, err := StreamText(context.Background(), StreamTextOptions{
+		GenerateTextOptions: GenerateTextOptions{
+			Model:  model,
+			Prompt: "say hello",
+		},
+		Transforms: []StreamTransform{SmoothStream(SmoothStreamOptions{Delay: &noDelay})},
+	})
+	if err != nil {
+		t.Fatalf("StreamText failed: %v", err)
+	}
+
+	var chunks []string
+	for part := range result.Stream {
+		if part.Type == "text-delta" {
+			chunks = append(chunks, part.TextDelta)
+		}
+	}
+	if len(chunks) != 2 || chunks[0] != "Hello, " || chunks[1] != "world!" {
+		t.Fatalf("chunks = %#v", chunks)
+	}
+	if result.Text != "Hello, world!" {
+		t.Fatalf("result text = %q", result.Text)
+	}
+}
