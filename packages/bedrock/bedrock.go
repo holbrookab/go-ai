@@ -309,7 +309,7 @@ func bedrockToolConfig(tools []ai.ModelTool, choice ai.ToolChoice) map[string]an
 func (m *LanguageModel) parseContent(parts []bedrockContent, jsonTool bool) []ai.Part {
 	var out []ai.Part
 	for _, part := range parts {
-		if part.Text != nil {
+		if part.Text != nil && *part.Text != "" {
 			out = append(out, ai.TextPart{Text: *part.Text})
 		}
 		if part.ToolUse != nil {

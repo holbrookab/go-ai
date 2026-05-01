@@ -146,6 +146,37 @@ func TestDoGenerateParsesUpstreamToolFixture(t *testing.T) {
 	}
 }
 
+func TestDoGenerateSkipsEmptyTextBeforeJSONToolResponse(t *testing.T) {
+	client := &captureClient{response: `{
+		"output":{"message":{"content":[
+			{"text":""},
+			{"toolUse":{"toolUseId":"json-id","name":"json","input":{"skills":[],"execution":"parallel","reason":"Greeting only"}}}
+		]}},
+		"stopReason":"tool_use"
+	}`}
+	provider := New(Settings{
+		Region: "us-east-1",
+		APIKey: "token",
+		Client: client,
+	})
+	result, err := provider.LanguageModel("amazon.nova-lite-v1:0").DoGenerate(context.Background(), ai.LanguageModelCallOptions{
+		Prompt: []ai.Message{ai.UserMessage("Aloha")},
+		ResponseFormat: &ai.ResponseFormat{
+			Type:   "json",
+			Schema: map[string]any{"type": "object"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("DoGenerate failed: %v", err)
+	}
+	if len(result.Content) != 1 {
+		t.Fatalf("expected only the JSON text part, got %#v", result.Content)
+	}
+	if got := ai.TextFromParts(result.Content); got != `{"execution":"parallel","reason":"Greeting only","skills":[]}` {
+		t.Fatalf("unexpected JSON response text: %q", got)
+	}
+}
+
 func TestDoStreamDecodesBedrockEventStreamFrames(t *testing.T) {
 	var stream bytes.Buffer
 	encoder := eventstream.NewEncoder()
