@@ -372,8 +372,8 @@ func (m *LanguageModel) scanEventStream(r io.Reader, jsonTool bool, out chan<- a
 		if len(message.Payload) == 0 {
 			continue
 		}
-		var event map[string]json.RawMessage
-		if err := json.Unmarshal(message.Payload, &event); err != nil {
+		event, err := bedrockEventStreamPayload(message.Headers, message.Payload)
+		if err != nil {
 			out <- ai.StreamPart{Type: "error", Err: err}
 			continue
 		}
@@ -381,6 +381,34 @@ func (m *LanguageModel) scanEventStream(r io.Reader, jsonTool bool, out chan<- a
 		state.handle(event, jsonTool, out)
 	}
 	out <- ai.StreamPart{Type: "finish", FinishReason: state.finish, Usage: state.usage}
+}
+
+func bedrockEventStreamPayload(headers eventstream.Headers, payload []byte) (map[string]json.RawMessage, error) {
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return nil, err
+	}
+	eventType := eventStreamHeader(headers, ":event-type")
+	if eventType == "" {
+		return body, nil
+	}
+	if _, ok := body[eventType]; ok {
+		return body, nil
+	}
+	return map[string]json.RawMessage{
+		eventType: json.RawMessage(append([]byte(nil), payload...)),
+	}, nil
+}
+
+func eventStreamHeader(headers eventstream.Headers, name string) string {
+	value := headers.Get(name)
+	if value == nil {
+		return ""
+	}
+	if text, ok := value.Get().(string); ok {
+		return text
+	}
+	return value.String()
 }
 
 func (m *LanguageModel) scanJSONLinesStream(r io.Reader, jsonTool bool, out chan<- ai.StreamPart) {

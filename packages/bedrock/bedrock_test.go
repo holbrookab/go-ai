@@ -262,6 +262,65 @@ func TestDoStreamDecodesBedrockEventStreamFrames(t *testing.T) {
 	}
 }
 
+func TestDoStreamDecodesBedrockEventStreamHeaders(t *testing.T) {
+	var stream bytes.Buffer
+	encoder := eventstream.NewEncoder()
+	events := []struct {
+		eventType string
+		payload   string
+	}{
+		{"messageStart", `{"role":"assistant"}`},
+		{"contentBlockDelta", `{"contentBlockIndex":0,"delta":{"text":"Hello!"},"p":"opaque"}`},
+		{"contentBlockDelta", `{"contentBlockIndex":0,"delta":{"text":" How can I help?"}}`},
+		{"contentBlockStop", `{"contentBlockIndex":0}`},
+		{"messageStop", `{"stopReason":"end_turn"}`},
+		{"metadata", `{"usage":{"inputTokens":2,"outputTokens":3,"totalTokens":5},"metrics":{"latencyMs":1}}`},
+	}
+	for _, event := range events {
+		if err := encoder.Encode(&stream, eventstream.Message{
+			Headers: eventstream.Headers{
+				{Name: ":event-type", Value: eventstream.StringValue(event.eventType)},
+			},
+			Payload: []byte(event.payload),
+		}); err != nil {
+			t.Fatalf("encode event stream frame: %v", err)
+		}
+	}
+	client := &captureClient{response: stream.String()}
+	provider := New(Settings{
+		Region: "us-east-1",
+		APIKey: "token",
+		Client: client,
+	})
+	result, err := provider.LanguageModel("amazon.nova-lite-v1:0").DoStream(context.Background(), ai.LanguageModelCallOptions{
+		Prompt: []ai.Message{ai.UserMessage("hello")},
+	})
+	if err != nil {
+		t.Fatalf("DoStream failed: %v", err)
+	}
+	var text string
+	var finish ai.StreamPart
+	var textDeltaCount int
+	for part := range result.Stream {
+		if part.Type == "text-delta" {
+			text += part.TextDelta
+			textDeltaCount++
+		}
+		if part.Type == "finish" {
+			finish = part
+		}
+		if part.Type == "error" {
+			t.Fatalf("unexpected stream error: %v", part.Err)
+		}
+	}
+	if text != "Hello! How can I help?" || textDeltaCount != 2 {
+		t.Fatalf("expected classified text deltas, got text %q count %d", text, textDeltaCount)
+	}
+	if finish.FinishReason.Unified != ai.FinishStop || finish.FinishReason.Raw != "end_turn" || intValue(finish.Usage.TotalTokens) != 5 {
+		t.Fatalf("unexpected finish part: %#v", finish)
+	}
+}
+
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
