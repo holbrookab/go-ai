@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 	awsv4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/holbrookab/go-ai/internal/httputil"
 	"github.com/holbrookab/go-ai/packages/ai"
@@ -339,12 +340,45 @@ func (m *LanguageModel) parseContent(parts []bedrockContent, jsonTool bool) []ai
 }
 
 func (m *LanguageModel) scanStream(r io.Reader, jsonTool bool, out chan<- ai.StreamPart) {
+	reader := bufio.NewReader(r)
+	if first, err := reader.Peek(1); err == nil && len(first) > 0 && first[0] == 0 {
+		m.scanEventStream(reader, jsonTool, out)
+		return
+	}
+	m.scanJSONLinesStream(reader, jsonTool, out)
+}
+
+func (m *LanguageModel) scanEventStream(r io.Reader, jsonTool bool, out chan<- ai.StreamPart) {
+	decoder := eventstream.NewDecoder()
+	var payloadBuf []byte
+	state := newBedrockStreamState()
+	for {
+		message, err := decoder.Decode(r, payloadBuf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			out <- ai.StreamPart{Type: "error", Err: err}
+			break
+		}
+		payloadBuf = message.Payload[:0]
+		if len(message.Payload) == 0 {
+			continue
+		}
+		var event map[string]json.RawMessage
+		if err := json.Unmarshal(message.Payload, &event); err != nil {
+			out <- ai.StreamPart{Type: "error", Err: err}
+			continue
+		}
+		out <- ai.StreamPart{Type: "raw", Raw: json.RawMessage(append([]byte(nil), message.Payload...))}
+		state.handle(event, jsonTool, out)
+	}
+	out <- ai.StreamPart{Type: "finish", FinishReason: state.finish, Usage: state.usage}
+}
+
+func (m *LanguageModel) scanJSONLinesStream(r io.Reader, jsonTool bool, out chan<- ai.StreamPart) {
 	scanner := bufio.NewScanner(r)
-	var usage ai.Usage
-	finish := ai.FinishReason{Unified: ai.FinishOther}
-	toolBuffers := map[int]*strings.Builder{}
-	toolNames := map[int]string{}
-	toolIDs := map[int]string{}
+	state := newBedrockStreamState()
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -359,86 +393,107 @@ func (m *LanguageModel) scanStream(r io.Reader, jsonTool bool, out chan<- ai.Str
 			continue
 		}
 		out <- ai.StreamPart{Type: "raw", Raw: json.RawMessage(append([]byte(nil), line...))}
-		for typ, raw := range event {
-			switch typ {
-			case "contentBlockStart":
-				var value struct {
-					ContentBlockIndex int `json:"contentBlockIndex"`
-					Start             struct {
-						ToolUse *struct {
-							ToolUseID string `json:"toolUseId"`
-							Name      string `json:"name"`
-						} `json:"toolUse"`
-					} `json:"start"`
-				}
-				_ = json.Unmarshal(raw, &value)
-				if value.Start.ToolUse != nil {
-					toolBuffers[value.ContentBlockIndex] = &strings.Builder{}
-					toolIDs[value.ContentBlockIndex] = value.Start.ToolUse.ToolUseID
-					toolNames[value.ContentBlockIndex] = value.Start.ToolUse.Name
-					out <- ai.StreamPart{Type: "tool-input-start", ToolCallID: value.Start.ToolUse.ToolUseID, ToolName: value.Start.ToolUse.Name}
-				} else {
-					out <- ai.StreamPart{Type: "text-start"}
-				}
-			case "contentBlockDelta":
-				var value struct {
-					ContentBlockIndex int `json:"contentBlockIndex"`
-					Delta             struct {
-						Text             string                  `json:"text"`
-						ToolUse          *struct{ Input string } `json:"toolUse"`
-						ReasoningContent *struct {
-							Text string `json:"text"`
-						} `json:"reasoningContent"`
-					} `json:"delta"`
-				}
-				_ = json.Unmarshal(raw, &value)
-				if value.Delta.Text != "" {
-					out <- ai.StreamPart{Type: "text-delta", TextDelta: value.Delta.Text}
-				}
-				if value.Delta.ReasoningContent != nil {
-					out <- ai.StreamPart{Type: "reasoning-delta", ReasoningDelta: value.Delta.ReasoningContent.Text}
-				}
-				if value.Delta.ToolUse != nil {
-					if b := toolBuffers[value.ContentBlockIndex]; b != nil {
-						b.WriteString(value.Delta.ToolUse.Input)
-					}
-					out <- ai.StreamPart{Type: "tool-input-delta", ToolInputDelta: value.Delta.ToolUse.Input, ToolCallID: toolIDs[value.ContentBlockIndex], ToolName: toolNames[value.ContentBlockIndex]}
-				}
-			case "contentBlockStop":
-				var value struct{ ContentBlockIndex int }
-				_ = json.Unmarshal(raw, &value)
-				if b := toolBuffers[value.ContentBlockIndex]; b != nil {
-					input := b.String()
-					name := toolNames[value.ContentBlockIndex]
-					id := toolIDs[value.ContentBlockIndex]
-					out <- ai.StreamPart{Type: "tool-input-end", ToolCallID: id, ToolName: name, ToolInput: input}
-					if jsonTool && name == "json" {
-						out <- ai.StreamPart{Type: "text-delta", TextDelta: input}
-					} else {
-						out <- ai.StreamPart{Type: "tool-call", ToolCallID: id, ToolName: name, ToolInput: input}
-					}
-				} else {
-					out <- ai.StreamPart{Type: "text-end"}
-				}
-			case "messageStop":
-				var value struct {
-					StopReason string `json:"stopReason"`
-				}
-				_ = json.Unmarshal(raw, &value)
-				finish = ai.FinishReason{Unified: mapFinish(value.StopReason, jsonTool), Raw: value.StopReason}
-			case "metadata":
-				var value struct {
-					Usage bedrockUsage `json:"usage"`
-				}
-				_ = json.Unmarshal(raw, &value)
-				usage = convertUsage(value.Usage)
-			}
-		}
+		state.handle(event, jsonTool, out)
 	}
 	if err := scanner.Err(); err != nil {
 		out <- ai.StreamPart{Type: "error", Err: err}
 	}
-	out <- ai.StreamPart{Type: "finish", FinishReason: finish, Usage: usage}
+	out <- ai.StreamPart{Type: "finish", FinishReason: state.finish, Usage: state.usage}
+}
+
+type bedrockStreamState struct {
+	usage       ai.Usage
+	finish      ai.FinishReason
+	toolBuffers map[int]*strings.Builder
+	toolNames   map[int]string
+	toolIDs     map[int]string
+}
+
+func newBedrockStreamState() *bedrockStreamState {
+	return &bedrockStreamState{
+		finish:      ai.FinishReason{Unified: ai.FinishOther},
+		toolBuffers: map[int]*strings.Builder{},
+		toolNames:   map[int]string{},
+		toolIDs:     map[int]string{},
+	}
+}
+
+func (s *bedrockStreamState) handle(event map[string]json.RawMessage, jsonTool bool, out chan<- ai.StreamPart) {
+	for typ, raw := range event {
+		switch typ {
+		case "contentBlockStart":
+			var value struct {
+				ContentBlockIndex int `json:"contentBlockIndex"`
+				Start             struct {
+					ToolUse *struct {
+						ToolUseID string `json:"toolUseId"`
+						Name      string `json:"name"`
+					} `json:"toolUse"`
+				} `json:"start"`
+			}
+			_ = json.Unmarshal(raw, &value)
+			if value.Start.ToolUse != nil {
+				s.toolBuffers[value.ContentBlockIndex] = &strings.Builder{}
+				s.toolIDs[value.ContentBlockIndex] = value.Start.ToolUse.ToolUseID
+				s.toolNames[value.ContentBlockIndex] = value.Start.ToolUse.Name
+				out <- ai.StreamPart{Type: "tool-input-start", ToolCallID: value.Start.ToolUse.ToolUseID, ToolName: value.Start.ToolUse.Name}
+			} else {
+				out <- ai.StreamPart{Type: "text-start"}
+			}
+		case "contentBlockDelta":
+			var value struct {
+				ContentBlockIndex int `json:"contentBlockIndex"`
+				Delta             struct {
+					Text             string                  `json:"text"`
+					ToolUse          *struct{ Input string } `json:"toolUse"`
+					ReasoningContent *struct {
+						Text string `json:"text"`
+					} `json:"reasoningContent"`
+				} `json:"delta"`
+			}
+			_ = json.Unmarshal(raw, &value)
+			if value.Delta.Text != "" {
+				out <- ai.StreamPart{Type: "text-delta", TextDelta: value.Delta.Text}
+			}
+			if value.Delta.ReasoningContent != nil {
+				out <- ai.StreamPart{Type: "reasoning-delta", ReasoningDelta: value.Delta.ReasoningContent.Text}
+			}
+			if value.Delta.ToolUse != nil {
+				if b := s.toolBuffers[value.ContentBlockIndex]; b != nil {
+					b.WriteString(value.Delta.ToolUse.Input)
+				}
+				out <- ai.StreamPart{Type: "tool-input-delta", ToolInputDelta: value.Delta.ToolUse.Input, ToolCallID: s.toolIDs[value.ContentBlockIndex], ToolName: s.toolNames[value.ContentBlockIndex]}
+			}
+		case "contentBlockStop":
+			var value struct{ ContentBlockIndex int }
+			_ = json.Unmarshal(raw, &value)
+			if b := s.toolBuffers[value.ContentBlockIndex]; b != nil {
+				input := b.String()
+				name := s.toolNames[value.ContentBlockIndex]
+				id := s.toolIDs[value.ContentBlockIndex]
+				out <- ai.StreamPart{Type: "tool-input-end", ToolCallID: id, ToolName: name, ToolInput: input}
+				if jsonTool && name == "json" {
+					out <- ai.StreamPart{Type: "text-delta", TextDelta: input}
+				} else {
+					out <- ai.StreamPart{Type: "tool-call", ToolCallID: id, ToolName: name, ToolInput: input}
+				}
+			} else {
+				out <- ai.StreamPart{Type: "text-end"}
+			}
+		case "messageStop":
+			var value struct {
+				StopReason string `json:"stopReason"`
+			}
+			_ = json.Unmarshal(raw, &value)
+			s.finish = ai.FinishReason{Unified: mapFinish(value.StopReason, jsonTool), Raw: value.StopReason}
+		case "metadata":
+			var value struct {
+				Usage bedrockUsage `json:"usage"`
+			}
+			_ = json.Unmarshal(raw, &value)
+			s.usage = convertUsage(value.Usage)
+		}
+	}
 }
 
 func (m *LanguageModel) post(ctx context.Context, endpoint string, headers map[string]string, body any) ([]byte, map[string]string, error) {

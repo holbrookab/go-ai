@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 	"github.com/holbrookab/go-ai/packages/ai"
 )
 
@@ -145,6 +146,53 @@ func TestDoGenerateParsesUpstreamToolFixture(t *testing.T) {
 	}
 }
 
+func TestDoStreamDecodesBedrockEventStreamFrames(t *testing.T) {
+	var stream bytes.Buffer
+	encoder := eventstream.NewEncoder()
+	for _, payload := range []string{
+		`{"contentBlockStart":{"contentBlockIndex":0,"start":{}}}`,
+		`{"contentBlockDelta":{"contentBlockIndex":0,"delta":{"text":"hello"}}}`,
+		`{"contentBlockStop":{"contentBlockIndex":0}}`,
+		`{"messageStop":{"stopReason":"end_turn"}}`,
+		`{"metadata":{"usage":{"inputTokens":2,"outputTokens":3,"totalTokens":5}}}`,
+	} {
+		if err := encoder.Encode(&stream, eventstream.Message{Payload: []byte(payload)}); err != nil {
+			t.Fatalf("encode event stream frame: %v", err)
+		}
+	}
+	client := &captureClient{response: stream.String()}
+	provider := New(Settings{
+		Region: "us-east-1",
+		APIKey: "token",
+		Client: client,
+	})
+	result, err := provider.LanguageModel("amazon.nova-lite-v1:0").DoStream(context.Background(), ai.LanguageModelCallOptions{
+		Prompt: []ai.Message{ai.UserMessage("hello")},
+	})
+	if err != nil {
+		t.Fatalf("DoStream failed: %v", err)
+	}
+	var text string
+	var finish ai.StreamPart
+	for part := range result.Stream {
+		if part.Type == "text-delta" {
+			text += part.TextDelta
+		}
+		if part.Type == "finish" {
+			finish = part
+		}
+		if part.Type == "error" {
+			t.Fatalf("unexpected stream error: %v", part.Err)
+		}
+	}
+	if text != "hello" {
+		t.Fatalf("expected streamed text, got %q", text)
+	}
+	if finish.FinishReason.Unified != ai.FinishStop || intValue(finish.Usage.InputTokens) != 2 || intValue(finish.Usage.OutputTokens) != 3 || intValue(finish.Usage.TotalTokens) != 5 {
+		t.Fatalf("unexpected finish part: %#v", finish)
+	}
+}
+
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
@@ -169,3 +217,10 @@ func (c *captureClient) Do(req *http.Request) (*http.Response, error) {
 
 func ptr(v int) *int          { return &v }
 func fptr(v float64) *float64 { return &v }
+
+func intValue(v *int) int {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
