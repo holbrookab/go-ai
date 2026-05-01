@@ -543,7 +543,14 @@ func sendStreamError(ctx context.Context, opts StreamTextOptions, out chan<- Str
 }
 
 func emitAbort(ctx context.Context, opts StreamTextOptions, out chan<- StreamPart, err error) {
-	emitStreamChunk(ctx, opts, out, StreamPart{Type: "abort", AbortReason: abortReason(err)})
+	abortCtx := context.WithoutCancel(ctx)
+	timeout := opts.Timeout.Chunk
+	if timeout <= 0 {
+		timeout = 100 * time.Millisecond
+	}
+	abortCtx, cancel := context.WithTimeout(abortCtx, timeout)
+	defer cancel()
+	emitStreamChunk(abortCtx, opts, out, StreamPart{Type: "abort", AbortReason: abortReason(err)})
 }
 
 func emitStreamChunk(ctx context.Context, opts StreamTextOptions, out chan<- StreamPart, part StreamPart) bool {

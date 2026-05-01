@@ -535,6 +535,11 @@ func safeWriteUIMessageChunkContext(ctx context.Context, out chan<- UIMessageChu
 	select {
 	case <-ctx.Done():
 		return false
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return false
 	case out <- chunk:
 		return true
 	}
