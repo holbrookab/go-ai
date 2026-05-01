@@ -122,6 +122,48 @@ func TestGenerateObjectSchemaValidationUsesNamedError(t *testing.T) {
 	}
 }
 
+func TestGenerateObjectSchemaValidationCoversCommonKeywords(t *testing.T) {
+	model := &sequenceModel{generate: func(opts LanguageModelCallOptions) (*LanguageModelGenerateResult, error) {
+		return &LanguageModelGenerateResult{Content: []Part{TextPart{Text: `{"name":"Ada","extra":true}`}}}, nil
+	}}
+	_, err := GenerateObject(context.Background(), GenerateObjectOptions{
+		Model:  model,
+		Prompt: "json",
+		Schema: map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"properties": map[string]any{
+				"name": map[string]any{"type": []any{"string", "null"}},
+			},
+		},
+	})
+	if !IsNoObjectGeneratedError(err) {
+		t.Fatalf("expected additionalProperties validation error, got %T %v", err, err)
+	}
+}
+
+func TestGenerateObjectSchemaValidationAllowsTypeUnions(t *testing.T) {
+	model := &sequenceModel{generate: func(opts LanguageModelCallOptions) (*LanguageModelGenerateResult, error) {
+		return &LanguageModelGenerateResult{Content: []Part{TextPart{Text: `{"name":null}`}}}, nil
+	}}
+	result, err := GenerateObject(context.Background(), GenerateObjectOptions{
+		Model:  model,
+		Prompt: "json",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name": map[string]any{"type": []any{"string", "null"}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("GenerateObject failed: %v", err)
+	}
+	if _, ok := result.Object.(map[string]any); !ok {
+		t.Fatalf("unexpected object: %#v", result.Object)
+	}
+}
+
 func TestGenerateObjectArrayOutputStrategyUnwrapsElements(t *testing.T) {
 	model := &sequenceModel{generate: func(opts LanguageModelCallOptions) (*LanguageModelGenerateResult, error) {
 		schema := opts.ResponseFormat.Schema.(map[string]any)
@@ -246,5 +288,44 @@ func TestStreamObjectEmitsFinalValidationError(t *testing.T) {
 	}
 	if !sawError {
 		t.Fatalf("expected final schema validation error")
+	}
+}
+
+func TestStreamObjectArrayOutputEmitsElements(t *testing.T) {
+	model := &sequenceModel{stream: func(opts LanguageModelCallOptions) (*LanguageModelStreamResult, error) {
+		ch := make(chan StreamPart, 5)
+		ch <- StreamPart{Type: "text-delta", TextDelta: `{"elements":[`}
+		ch <- StreamPart{Type: "text-delta", TextDelta: `{"name":"Ada"},`}
+		ch <- StreamPart{Type: "text-delta", TextDelta: `{"name":"Grace"}`}
+		ch <- StreamPart{Type: "text-delta", TextDelta: `]}`}
+		ch <- StreamPart{Type: "finish", FinishReason: FinishReason{Unified: FinishStop}}
+		close(ch)
+		return &LanguageModelStreamResult{Stream: ch}, nil
+	}}
+	result, err := StreamObject(context.Background(), StreamObjectOptions{
+		GenerateObjectOptions: GenerateObjectOptions{
+			Model:  model,
+			Prompt: "json",
+			Output: OutputArray,
+			Schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StreamObject failed: %v", err)
+	}
+
+	streamElements := []any{}
+	for part := range result.Stream {
+		if part.Type == "element" {
+			streamElements = append(streamElements, part.Element)
+		}
+	}
+	if len(streamElements) != 2 {
+		t.Fatalf("expected two stream element parts, got %#v", streamElements)
 	}
 }

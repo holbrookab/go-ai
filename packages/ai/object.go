@@ -141,15 +141,25 @@ func StreamObject(ctx context.Context, opts StreamObjectOptions) (*StreamObjectR
 	}
 
 	out := make(chan ObjectStreamPart)
+	elements := make(chan any, 16)
 	go func() {
 		defer close(out)
+		defer close(elements)
 		var text string
 		var lastObject any
 		var haveLastObject bool
+		var publishedElements int
 		emitPartialObject := func(raw any) {
 			object, err := ParsePartialJSON(text)
 			if err != nil || object == nil {
 				return
+			}
+			if opts.Output == OutputArray && !completeJSON(text) {
+				if wrapped, ok := object.(map[string]any); ok {
+					if current, ok := wrapped["elements"].([]any); ok && len(current) > 0 {
+						wrapped["elements"] = current[:len(current)-1]
+					}
+				}
 			}
 			object = normalizePartialObjectOutput(opts.GenerateObjectOptions, object)
 			if haveLastObject && DeepEqual(lastObject, object) {
@@ -158,10 +168,23 @@ func StreamObject(ctx context.Context, opts StreamObjectOptions) (*StreamObjectR
 			lastObject = object
 			haveLastObject = true
 			out <- ObjectStreamPart{Type: "object", Object: object, Raw: raw}
+			if opts.Output == OutputArray {
+				if newElements, next := newObjectElements(opts.GenerateObjectOptions, object, publishedElements); next != publishedElements {
+					publishedElements = next
+					for _, element := range newElements {
+						sendObjectElement(elements, element)
+						out <- ObjectStreamPart{Type: "element", Element: element, Raw: raw}
+					}
+				}
+			}
 		}
 		for part := range stream.Stream {
 			if part.Err != nil {
 				out <- ObjectStreamPart{Type: "error", Err: part.Err, Raw: rawStreamPart(opts.IncludeRawChunks, part)}
+				continue
+			}
+			if part.Type == "abort" {
+				out <- ObjectStreamPart{Type: "abort", AbortReason: part.AbortReason, Raw: rawStreamPart(opts.IncludeRawChunks, part)}
 				continue
 			}
 			if part.TextDelta != "" {
@@ -207,7 +230,23 @@ func StreamObject(ctx context.Context, opts StreamObjectOptions) (*StreamObjectR
 			}
 		}
 	}()
-	return &StreamObjectResult{Stream: out, Request: stream.Request, Response: stream.Response}, nil
+	return &StreamObjectResult{Stream: out, Elements: elements, Request: stream.Request, Response: stream.Response}, nil
+}
+
+func sendObjectElement(out chan<- any, element any) {
+	defer func() {
+		_ = recover()
+	}()
+	select {
+	case out <- element:
+	default:
+		go func() {
+			defer func() {
+				_ = recover()
+			}()
+			out <- element
+		}()
+	}
 }
 
 func objectResponseFormat(opts GenerateObjectOptions) (*ResponseFormat, error) {
@@ -425,10 +464,29 @@ func normalizePartialObjectOutput(opts GenerateObjectOptions, object any) any {
 	return object
 }
 
+func newObjectElements(opts GenerateObjectOptions, object any, published int) ([]any, int) {
+	elements, ok := object.([]any)
+	if !ok || published >= len(elements) {
+		return nil, published
+	}
+	valid := make([]any, 0, len(elements)-published)
+	for _, element := range elements[published:] {
+		if opts.Schema == nil || validateJSONSchema(normalizeSchema(opts.Schema), element, "$") == nil {
+			valid = append(valid, element)
+		}
+	}
+	return valid, len(elements)
+}
+
 func validateJSONSchema(schema any, value any, path string) error {
 	m, ok := schema.(map[string]any)
 	if !ok {
 		return nil
+	}
+	if constValue, ok := m["const"]; ok {
+		if !DeepEqual(constValue, value) {
+			return &SDKError{Kind: ErrNoObjectGenerated, Message: path + " does not match const"}
+		}
 	}
 	if enumValues, ok := m["enum"].([]any); ok {
 		for _, allowed := range enumValues {
@@ -438,7 +496,35 @@ func validateJSONSchema(schema any, value any, path string) error {
 		}
 		return &SDKError{Kind: ErrNoObjectGenerated, Message: path + " is not one of the allowed enum values"}
 	}
-	if typ, _ := m["type"].(string); typ != "" {
+	if enumStrings, ok := m["enum"].([]string); ok {
+		for _, allowed := range enumStrings {
+			if allowed == value {
+				return nil
+			}
+		}
+		return &SDKError{Kind: ErrNoObjectGenerated, Message: path + " is not one of the allowed enum values"}
+	}
+	if anyOf, ok := schemaSlice(m["anyOf"]); ok {
+		if !matchesAnyJSONSchema(anyOf, value, path) {
+			return &SDKError{Kind: ErrNoObjectGenerated, Message: path + " does not match anyOf"}
+		}
+	}
+	if oneOf, ok := schemaSlice(m["oneOf"]); ok {
+		matches := 0
+		for _, candidate := range oneOf {
+			if validateJSONSchema(candidate, value, path) == nil {
+				matches++
+			}
+		}
+		if matches != 1 {
+			return &SDKError{Kind: ErrNoObjectGenerated, Message: path + " does not match exactly one schema"}
+		}
+	}
+	if types := schemaStringSlice(m["type"]); len(types) > 0 {
+		if !matchesAnyJSONType(types, value, path) {
+			return &SDKError{Kind: ErrNoObjectGenerated, Message: path + " must be one of " + strings.Join(types, ", ")}
+		}
+	} else if typ, _ := m["type"].(string); typ != "" {
 		if err := validateJSONType(typ, value, path); err != nil {
 			return err
 		}
@@ -461,6 +547,13 @@ func validateJSONSchema(schema any, value any, path string) error {
 				return err
 			}
 		}
+		if additional, ok := m["additionalProperties"].(bool); ok && !additional {
+			for key := range typed {
+				if _, known := properties[key]; !known {
+					return &SDKError{Kind: ErrNoObjectGenerated, Message: path + "." + key + " is not allowed"}
+				}
+			}
+		}
 	case []any:
 		itemSchema, ok := m["items"]
 		if !ok {
@@ -473,6 +566,39 @@ func validateJSONSchema(schema any, value any, path string) error {
 		}
 	}
 	return nil
+}
+
+func matchesAnyJSONSchema(schemas []any, value any, path string) bool {
+	for _, schema := range schemas {
+		if validateJSONSchema(schema, value, path) == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesAnyJSONType(types []string, value any, path string) bool {
+	for _, typ := range types {
+		if validateJSONType(typ, value, path) == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func schemaSlice(value any) ([]any, bool) {
+	switch v := value.(type) {
+	case []any:
+		return v, true
+	case []map[string]any:
+		out := make([]any, len(v))
+		for i := range v {
+			out[i] = v[i]
+		}
+		return out, true
+	default:
+		return nil, false
+	}
 }
 
 func validateJSONType(typ string, value any, path string) error {

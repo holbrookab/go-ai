@@ -147,3 +147,70 @@ func TestToolLoopAgentDefaultStepLimitIsTwenty(t *testing.T) {
 		t.Fatalf("steps = %d, want 20", len(result.Steps))
 	}
 }
+
+func TestToolLoopAgentStreamForwardsTransforms(t *testing.T) {
+	model := NewMockLanguageModel("agent-stream")
+	model.StreamFunc = func(context.Context, LanguageModelCallOptions) (*LanguageModelStreamResult, error) {
+		ch := make(chan StreamPart, 2)
+		ch <- StreamPart{Type: "text-delta", TextDelta: "raw"}
+		ch <- StreamPart{Type: "finish", FinishReason: FinishReason{Unified: FinishStop}}
+		close(ch)
+		return &LanguageModelStreamResult{Stream: ch}, nil
+	}
+	agent := NewToolLoopAgent(ToolLoopAgentSettings{
+		Model: model,
+		Transforms: []StreamTransform{
+			func(ctx context.Context, in <-chan StreamPart, opts StreamTransformOptions) <-chan StreamPart {
+				out := make(chan StreamPart)
+				go func() {
+					defer close(out)
+					for part := range in {
+						if part.Type == "text-delta" {
+							part.TextDelta = "transformed"
+						}
+						out <- part
+					}
+				}()
+				return out
+			},
+		},
+	})
+
+	result, err := agent.Stream(context.Background(), AgentStreamOptions{AgentCallOptions: AgentCallOptions{Prompt: "hello"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range result.Stream {
+	}
+	if result.Text != "transformed" {
+		t.Fatalf("expected transformed text, got %q", result.Text)
+	}
+}
+
+func TestToolLoopAgentGenerateForwardsOutput(t *testing.T) {
+	model := NewMockLanguageModel("agent-output")
+	model.GenerateFunc = func(ctx context.Context, opts LanguageModelCallOptions) (*LanguageModelGenerateResult, error) {
+		if opts.ResponseFormat == nil || opts.ResponseFormat.Type != "json" {
+			t.Fatalf("expected output response format, got %#v", opts.ResponseFormat)
+		}
+		return &LanguageModelGenerateResult{
+			Content:      []Part{TextPart{Text: `{"result":"yes"}`}},
+			FinishReason: FinishReason{Unified: FinishStop},
+		}, nil
+	}
+	agent := NewToolLoopAgent(ToolLoopAgentSettings{Model: model})
+	result, err := agent.Generate(context.Background(), AgentCallOptions{
+		Prompt: "choose",
+		Output: ChoiceOutput([]string{"yes", "no"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := result.GetOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "yes" {
+		t.Fatalf("output = %#v", output)
+	}
+}

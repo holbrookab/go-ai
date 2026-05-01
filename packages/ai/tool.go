@@ -95,6 +95,34 @@ func normalizeSchema(schema any) any {
 	}
 }
 
+func ValidateToolInput(tool Tool, input any) error {
+	if tool.InputSchema != nil {
+		if err := validateJSONSchema(normalizeSchema(tool.InputSchema), input, "$"); err != nil {
+			return err
+		}
+	}
+	if tool.ValidateInput != nil {
+		if err := tool.ValidateInput(input); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ValidateToolOutput(tool Tool, output any) error {
+	if tool.OutputSchema != nil {
+		if err := validateJSONSchema(normalizeSchema(tool.OutputSchema), output, "$"); err != nil {
+			return err
+		}
+	}
+	if tool.ValidateOutput != nil {
+		if err := tool.ValidateOutput(output); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func CreateToolModelOutput(tool Tool, toolCallID string, input any, output any, isErr bool) (ToolResultOutput, error) {
 	if isErr {
 		if s, ok := output.(string); ok {

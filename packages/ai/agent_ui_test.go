@@ -91,3 +91,26 @@ func TestCreateAgentUIStreamMapsToolChunks(t *testing.T) {
 		t.Fatalf("expected tool input/output chunks, got %#v", chunks)
 	}
 }
+
+func TestCreateStreamTextUIMessageStreamMapsAbortChunk(t *testing.T) {
+	stream := make(chan StreamPart, 1)
+	stream <- StreamPart{Type: "abort", AbortReason: "manual abort"}
+	close(stream)
+
+	chunks, err := ReadUIMessageStream(CreateStreamTextUIMessageStream(context.Background(), &StreamTextResult{Stream: stream}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawAbort bool
+	for _, chunk := range chunks {
+		if chunk.Type == UIMessageChunkTypeAbort {
+			sawAbort = true
+			if chunk.Reason != "manual abort" {
+				t.Fatalf("abort reason = %q", chunk.Reason)
+			}
+		}
+	}
+	if !sawAbort {
+		t.Fatalf("expected abort chunk, got %#v", chunks)
+	}
+}

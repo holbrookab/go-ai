@@ -29,6 +29,7 @@ type ChatRequestHandlerOptions struct {
 	Response  UIMessageStreamResponseOptions
 	MessageID string
 	TextID    string
+	Resume    func(context.Context, ChatRequest) (<-chan UIMessageChunk, bool, error)
 }
 
 type CompletionRequestHandlerOptions struct {
@@ -45,10 +46,14 @@ func DecodeChatRequest(body io.Reader) (ChatRequest, error) {
 	if err := decodeOptionalField(raw, "id", &req.ID); err != nil {
 		return ChatRequest{}, err
 	}
-	if err := decodeRequiredField(raw, "messages", &req.Messages); err != nil {
+	if err := decodeOptionalField(raw, "trigger", &req.Trigger); err != nil {
 		return ChatRequest{}, err
 	}
-	if err := decodeOptionalField(raw, "trigger", &req.Trigger); err != nil {
+	if req.Trigger == "resume-stream" {
+		if err := decodeOptionalField(raw, "messages", &req.Messages); err != nil {
+			return ChatRequest{}, err
+		}
+	} else if err := decodeRequiredField(raw, "messages", &req.Messages); err != nil {
 		return ChatRequest{}, err
 	}
 	if err := decodeOptionalField(raw, "messageId", &req.MessageID); err != nil {
@@ -78,6 +83,10 @@ func DecodeCompletionRequest(body io.Reader) (CompletionRequest, error) {
 }
 
 func CreateChatUIMessageStream(ctx context.Context, req ChatRequest, opts ChatRequestHandlerOptions) (<-chan UIMessageChunk, error) {
+	if req.Trigger == "resume-stream" {
+		stream, _, err := ResumeChatUIMessageStream(ctx, req, opts)
+		return stream, err
+	}
 	validateOpts := opts.Validate
 	if validateOpts.Tools == nil {
 		validateOpts.Tools = opts.Stream.Tools
@@ -114,6 +123,20 @@ func CreateChatUIMessageStream(ctx context.Context, req ChatRequest, opts ChatRe
 	}), nil
 }
 
+func ResumeChatUIMessageStream(ctx context.Context, req ChatRequest, opts ChatRequestHandlerOptions) (<-chan UIMessageChunk, bool, error) {
+	if opts.Resume == nil {
+		return closedUIMessageStream(), false, nil
+	}
+	stream, ok, err := opts.Resume(ctx, req)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok || stream == nil {
+		return closedUIMessageStream(), false, nil
+	}
+	return stream, true, nil
+}
+
 func CreateChatUIMessageStreamResponse(ctx context.Context, req ChatRequest, opts ChatRequestHandlerOptions) (*http.Response, error) {
 	stream, err := CreateChatUIMessageStream(ctx, req, opts)
 	if err != nil {
@@ -130,11 +153,28 @@ func WriteChatUIMessageStreamResponse(w http.ResponseWriter, r *http.Request, op
 	if err != nil {
 		return err
 	}
+	if req.Trigger == "resume-stream" {
+		stream, ok, err := ResumeChatUIMessageStream(r.Context(), req, opts)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			w.WriteHeader(http.StatusNoContent)
+			return nil
+		}
+		return PipeUIMessageStreamToResponseContext(r.Context(), w, stream, opts.Response)
+	}
 	stream, err := CreateChatUIMessageStream(r.Context(), req, opts)
 	if err != nil {
 		return err
 	}
-	return WriteUIMessageStreamResponse(w, stream, opts.Response)
+	return PipeUIMessageStreamToResponseContext(r.Context(), w, stream, opts.Response)
+}
+
+func closedUIMessageStream() <-chan UIMessageChunk {
+	ch := make(chan UIMessageChunk)
+	close(ch)
+	return ch
 }
 
 func CreateCompletionStream(ctx context.Context, req CompletionRequest, opts CompletionRequestHandlerOptions) (*StreamTextResult, error) {

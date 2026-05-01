@@ -355,6 +355,7 @@ func (m *LanguageModel) scanStream(r io.Reader, jsonTool bool, out chan<- ai.Str
 			out <- ai.StreamPart{Type: "error", Err: err}
 			continue
 		}
+		out <- ai.StreamPart{Type: "raw", Raw: json.RawMessage(append([]byte(nil), line...))}
 		for typ, raw := range event {
 			switch typ {
 			case "contentBlockStart":

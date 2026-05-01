@@ -12,6 +12,10 @@ const Version = "0.1.0"
 
 type ProviderOptions map[string]any
 type ProviderMetadata map[string]any
+type JSONValue any
+type JSONObject map[string]JSONValue
+type JSONArray []JSONValue
+type JSONSchema map[string]any
 
 type Warning struct {
 	Type    string
@@ -66,16 +70,21 @@ const (
 )
 
 type ResponseMetadata struct {
-	ID        string
-	Timestamp time.Time
-	ModelID   string
-	Headers   map[string]string
-	Body      any
-	Messages  []Message
+	ID         string
+	Timestamp  time.Time
+	ModelID    string
+	StatusCode int
+	StatusText string
+	Headers    map[string]string
+	Body       any
+	Messages   []Message
 }
 
 type RequestMetadata struct {
-	Body any
+	Method  string
+	URL     string
+	Headers map[string]string
+	Body    any
 }
 
 type Provider interface {
@@ -317,6 +326,7 @@ type StreamPart struct {
 	ID               string
 	TextDelta        string
 	PartialOutput    any
+	Element          any
 	ReasoningDelta   string
 	ToolCallID       string
 	ToolName         string
@@ -330,6 +340,7 @@ type StreamPart struct {
 	Response         ResponseMetadata
 	ProviderMetadata ProviderMetadata
 	Raw              any
+	AbortReason      string
 	Err              error
 }
 

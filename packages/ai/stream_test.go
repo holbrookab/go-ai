@@ -183,6 +183,82 @@ func TestStreamTextAppliesTransformsToCanonicalText(t *testing.T) {
 	}
 }
 
+func TestStreamTextEmitsAbortOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	model := NewMockLanguageModel("stream-abort")
+	model.StreamFunc = func(ctx context.Context, opts LanguageModelCallOptions) (*LanguageModelStreamResult, error) {
+		ch := make(chan StreamPart)
+		go func() {
+			defer close(ch)
+			ch <- StreamPart{Type: "text-delta", TextDelta: "hello"}
+			<-ctx.Done()
+		}()
+		return &LanguageModelStreamResult{Stream: ch}, nil
+	}
+
+	result, err := StreamText(ctx, StreamTextOptions{
+		GenerateTextOptions: GenerateTextOptions{Model: model, Prompt: "hi"},
+	})
+	if err != nil {
+		t.Fatalf("StreamText failed: %v", err)
+	}
+	var sawAbort bool
+	for part := range result.Stream {
+		if part.Type == "text-delta" {
+			cancel()
+		}
+		if part.Type == "abort" {
+			sawAbort = true
+			if part.AbortReason == "" {
+				t.Fatalf("expected abort reason")
+			}
+		}
+	}
+	if !sawAbort || !result.Aborted {
+		t.Fatalf("expected aborted stream, sawAbort=%v result=%#v", sawAbort, result)
+	}
+}
+
+func TestStreamTextRawChunksRespectIncludeRawChunks(t *testing.T) {
+	model := &sequenceModel{stream: func(opts LanguageModelCallOptions) (*LanguageModelStreamResult, error) {
+		ch := make(chan StreamPart, 3)
+		ch <- StreamPart{Type: "raw", Raw: map[string]any{"event": "chunk"}}
+		ch <- StreamPart{Type: "text-delta", TextDelta: "ok"}
+		ch <- StreamPart{Type: "finish", FinishReason: FinishReason{Unified: FinishStop}}
+		close(ch)
+		return &LanguageModelStreamResult{Stream: ch}, nil
+	}}
+
+	withoutRaw, err := StreamText(context.Background(), StreamTextOptions{
+		GenerateTextOptions: GenerateTextOptions{Model: model, Prompt: "hi"},
+	})
+	if err != nil {
+		t.Fatalf("StreamText failed: %v", err)
+	}
+	for part := range withoutRaw.Stream {
+		if part.Type == "raw" {
+			t.Fatalf("did not expect raw part without IncludeRawChunks")
+		}
+	}
+
+	withRaw, err := StreamText(context.Background(), StreamTextOptions{
+		GenerateTextOptions: GenerateTextOptions{Model: model, Prompt: "hi"},
+		IncludeRawChunks:    true,
+	})
+	if err != nil {
+		t.Fatalf("StreamText failed: %v", err)
+	}
+	var sawRaw bool
+	for part := range withRaw.Stream {
+		if part.Type == "raw" {
+			sawRaw = true
+		}
+	}
+	if !sawRaw {
+		t.Fatalf("expected raw part with IncludeRawChunks")
+	}
+}
+
 func TestStreamTextTransformsToolCallInputBeforeParsing(t *testing.T) {
 	calls := 0
 	model := &sequenceModel{stream: func(opts LanguageModelCallOptions) (*LanguageModelStreamResult, error) {

@@ -165,6 +165,12 @@ func streamPartPayload(part StreamPart) map[string]any {
 	if part.TextDelta != "" {
 		payload["textDelta"] = part.TextDelta
 	}
+	if part.PartialOutput != nil {
+		payload["partialOutput"] = part.PartialOutput
+	}
+	if part.Element != nil {
+		payload["element"] = part.Element
+	}
 	if part.ReasoningDelta != "" {
 		payload["reasoningDelta"] = part.ReasoningDelta
 	}
@@ -203,6 +209,9 @@ func streamPartPayload(part StreamPart) map[string]any {
 	}
 	if part.Raw != nil {
 		payload["raw"] = part.Raw
+	}
+	if part.AbortReason != "" {
+		payload["reason"] = part.AbortReason
 	}
 	if part.Err != nil {
 		payload["error"] = part.Err.Error()

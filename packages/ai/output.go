@@ -22,6 +22,7 @@ type OutputStrategy struct {
 	ResponseFormat      *ResponseFormat
 	ParseCompleteOutput func(OutputParseContext) (any, error)
 	ParsePartialOutput  func(text string) (PartialOutputResult, error)
+	ElementsFromPartial func(partial any, published int) ([]any, int)
 }
 
 type OutputOptions struct {
@@ -125,6 +126,169 @@ func ObjectOutput(schema any, options ...OutputOptions) *OutputStrategy {
 	}
 }
 
+func ArrayOutput(elementSchema any, options ...OutputOptions) *OutputStrategy {
+	opts := firstOutputOptions(options)
+	schema := normalizeSchema(elementSchema)
+	return &OutputStrategy{
+		Name: "array",
+		ResponseFormat: &ResponseFormat{
+			Type: "json",
+			Schema: map[string]any{
+				"$schema": "http://json-schema.org/draft-07/schema#",
+				"type":    "object",
+				"properties": map[string]any{
+					"elements": map[string]any{"type": "array", "items": schema},
+				},
+				"required":             []any{"elements"},
+				"additionalProperties": false,
+			},
+			Name:        opts.Name,
+			Description: opts.Description,
+		},
+		ParseCompleteOutput: func(ctx OutputParseContext) (any, error) {
+			value, err := parseObjectText(ctx.Text)
+			if err != nil {
+				return nil, NewNoObjectGeneratedError(NoObjectGeneratedErrorOptions{
+					Message:      "No object generated: could not parse the response.",
+					Cause:        err,
+					Text:         ctx.Text,
+					Response:     ctx.Response,
+					Usage:        ctx.Usage,
+					FinishReason: ctx.FinishReason,
+				})
+			}
+			elements, ok := outputElements(value)
+			if !ok {
+				return nil, NewNoObjectGeneratedError(NoObjectGeneratedErrorOptions{
+					Message:      "No object generated: response did not match schema.",
+					Cause:        &SDKError{Kind: ErrNoObjectGenerated, Message: "response must be an object with an elements array"},
+					Text:         ctx.Text,
+					Response:     ctx.Response,
+					Usage:        ctx.Usage,
+					FinishReason: ctx.FinishReason,
+				})
+			}
+			if err := validateJSONSchema(map[string]any{"type": "array", "items": schema}, elements, "$"); err != nil {
+				return nil, NewNoObjectGeneratedError(NoObjectGeneratedErrorOptions{
+					Message:      "No object generated: response did not match schema.",
+					Cause:        err,
+					Text:         ctx.Text,
+					Response:     ctx.Response,
+					Usage:        ctx.Usage,
+					FinishReason: ctx.FinishReason,
+				})
+			}
+			return elements, nil
+		},
+		ParsePartialOutput: func(text string) (PartialOutputResult, error) {
+			if text == "" {
+				return PartialOutputResult{}, nil
+			}
+			value, err := ParsePartialJSON(text)
+			if err != nil || value == nil {
+				return PartialOutputResult{}, nil
+			}
+			elements, ok := outputElements(value)
+			if !ok {
+				return PartialOutputResult{}, nil
+			}
+			if !completeJSON(text) && len(elements) > 0 {
+				elements = elements[:len(elements)-1]
+			}
+			valid := make([]any, 0, len(elements))
+			for _, element := range elements {
+				if err := validateJSONSchema(schema, element, "$"); err == nil {
+					valid = append(valid, element)
+				}
+			}
+			return PartialOutputResult{Value: valid, OK: true}, nil
+		},
+		ElementsFromPartial: func(partial any, published int) ([]any, int) {
+			elements, ok := partial.([]any)
+			if !ok || published >= len(elements) {
+				return nil, published
+			}
+			next := append([]any(nil), elements[published:]...)
+			return next, len(elements)
+		},
+	}
+}
+
+func ChoiceOutput(choices []string, options ...OutputOptions) *OutputStrategy {
+	opts := firstOutputOptions(options)
+	allowed := append([]string(nil), choices...)
+	enum := make([]any, 0, len(allowed))
+	for _, choice := range allowed {
+		enum = append(enum, choice)
+	}
+	return &OutputStrategy{
+		Name: "choice",
+		ResponseFormat: &ResponseFormat{
+			Type: "json",
+			Schema: map[string]any{
+				"$schema": "http://json-schema.org/draft-07/schema#",
+				"type":    "object",
+				"properties": map[string]any{
+					"result": map[string]any{"type": "string", "enum": enum},
+				},
+				"required":             []any{"result"},
+				"additionalProperties": false,
+			},
+			Name:        opts.Name,
+			Description: opts.Description,
+		},
+		ParseCompleteOutput: func(ctx OutputParseContext) (any, error) {
+			value, err := parseObjectText(ctx.Text)
+			if err != nil {
+				return nil, NewNoObjectGeneratedError(NoObjectGeneratedErrorOptions{
+					Message:      "No object generated: could not parse the response.",
+					Cause:        err,
+					Text:         ctx.Text,
+					Response:     ctx.Response,
+					Usage:        ctx.Usage,
+					FinishReason: ctx.FinishReason,
+				})
+			}
+			choice, ok := outputChoice(value)
+			if !ok || !containsString(allowed, choice) {
+				return nil, NewNoObjectGeneratedError(NoObjectGeneratedErrorOptions{
+					Message:      "No object generated: response did not match schema.",
+					Cause:        &SDKError{Kind: ErrNoObjectGenerated, Message: "response must be an object that contains a choice value"},
+					Text:         ctx.Text,
+					Response:     ctx.Response,
+					Usage:        ctx.Usage,
+					FinishReason: ctx.FinishReason,
+				})
+			}
+			return choice, nil
+		},
+		ParsePartialOutput: func(text string) (PartialOutputResult, error) {
+			if text == "" {
+				return PartialOutputResult{}, nil
+			}
+			value, err := ParsePartialJSON(text)
+			if err != nil || value == nil {
+				return PartialOutputResult{}, nil
+			}
+			choice, ok := outputChoice(value)
+			if !ok {
+				return PartialOutputResult{}, nil
+			}
+			matches := prefixMatches(allowed, choice)
+			if completeJSON(text) {
+				if containsString(matches, choice) {
+					return PartialOutputResult{Value: choice, OK: true}, nil
+				}
+				return PartialOutputResult{}, nil
+			}
+			if len(matches) == 1 {
+				return PartialOutputResult{Value: matches[0], OK: true}, nil
+			}
+			return PartialOutputResult{}, nil
+		},
+	}
+}
+
 func (r *GenerateTextResult) GetOutput() (any, error) {
 	if r == nil {
 		return nil, NewNoOutputGeneratedError("", nil)
@@ -221,6 +385,56 @@ func parseJSONPartialOutput(text string) (PartialOutputResult, error) {
 		return PartialOutputResult{}, nil
 	}
 	return PartialOutputResult{Value: value, OK: true}, nil
+}
+
+func outputElements(value any) ([]any, bool) {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	elements, ok := object["elements"].([]any)
+	return elements, ok
+}
+
+func outputChoice(value any) (string, bool) {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	choice, ok := object["result"].(string)
+	return choice, ok
+}
+
+func completeJSON(text string) bool {
+	_, err := parseObjectText(text)
+	return err == nil
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func prefixMatches(values []string, prefix string) []string {
+	out := []string{}
+	for _, value := range values {
+		if len(prefix) <= len(value) && value[:len(prefix)] == prefix {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func elementsFromPartialOutput(strategy *OutputStrategy, partial any, published int) ([]any, int) {
+	strategy = outputStrategyOrDefault(strategy)
+	if strategy.ElementsFromPartial == nil {
+		return nil, published
+	}
+	return strategy.ElementsFromPartial(partial, published)
 }
 
 func firstOutputOptions(options []OutputOptions) OutputOptions {

@@ -119,6 +119,54 @@ func TestCreateChatUIMessageStreamResponseReturnsHTTPResponse(t *testing.T) {
 	}
 }
 
+func TestWriteChatUIMessageStreamResponseResumesExistingStream(t *testing.T) {
+	model := NewMockLanguageModel("chat")
+	httpReq := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{
+		"id": "chat-1",
+		"trigger": "resume-stream",
+		"messageId": "msg-1"
+	}`))
+	rec := httptest.NewRecorder()
+
+	err := WriteChatUIMessageStreamResponse(rec, httpReq, ChatRequestHandlerOptions{
+		Stream: StreamTextOptions{GenerateTextOptions: GenerateTextOptions{Model: model}},
+		Resume: func(ctx context.Context, req ChatRequest) (<-chan UIMessageChunk, bool, error) {
+			if req.ID != "chat-1" || req.MessageID != "msg-1" {
+				t.Fatalf("unexpected resume request: %#v", req)
+			}
+			stream := make(chan UIMessageChunk, 2)
+			stream <- StartUIMessageChunk("msg-1")
+			stream <- FinishUIMessageChunk(FinishStop)
+			close(stream)
+			return stream, true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("WriteChatUIMessageStreamResponse failed: %v", err)
+	}
+	if len(model.StreamCalls) != 0 {
+		t.Fatalf("resume should not start a new model call")
+	}
+	if !strings.Contains(rec.Body.String(), `"messageId":"msg-1"`) {
+		t.Fatalf("unexpected resume response: %s", rec.Body.String())
+	}
+}
+
+func TestWriteChatUIMessageStreamResponseResumeNoActiveStream(t *testing.T) {
+	httpReq := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{
+		"id": "chat-1",
+		"trigger": "resume-stream"
+	}`))
+	rec := httptest.NewRecorder()
+	err := WriteChatUIMessageStreamResponse(rec, httpReq, ChatRequestHandlerOptions{})
+	if err != nil {
+		t.Fatalf("WriteChatUIMessageStreamResponse failed: %v", err)
+	}
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+}
+
 func TestWriteCompletionRequestStreamResponseUsesPrompt(t *testing.T) {
 	model := NewMockLanguageModel("completion")
 	var captured LanguageModelCallOptions

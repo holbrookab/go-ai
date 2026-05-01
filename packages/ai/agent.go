@@ -51,6 +51,7 @@ type AgentStreamOptions struct {
 	AgentCallOptions
 	IncludeRawChunks bool
 	OnChunk          func(ChunkEvent)
+	Transforms       []StreamTransform
 }
 
 type ToolLoopAgentSettings struct {
@@ -79,6 +80,7 @@ type ToolLoopAgentSettings struct {
 	ResponseFormat       *ResponseFormat
 	PrepareStep          func(PrepareStepOptions) (*PrepareStepResult, error)
 	Telemetry            Telemetry
+	Transforms           []StreamTransform
 	OnStart              func(StartEvent)
 	OnToolExecutionStart func(ToolExecutionStartEvent)
 	OnToolExecutionEnd   func(ToolExecutionEndEvent)
@@ -121,6 +123,7 @@ type AgentPreparedCall struct {
 	ResponseFormat        *ResponseFormat
 	PrepareStep           func(PrepareStepOptions) (*PrepareStepResult, error)
 	Telemetry             Telemetry
+	Transforms            []StreamTransform
 }
 
 type ToolLoopAgent struct {
@@ -234,6 +237,7 @@ func (a *ToolLoopAgent) Stream(ctx context.Context, opts AgentStreamOptions) (*S
 		},
 		IncludeRawChunks: opts.IncludeRawChunks,
 		OnChunk:          opts.OnChunk,
+		Transforms:       firstStreamTransforms(opts.Transforms, call.Transforms),
 	})
 }
 
@@ -264,6 +268,7 @@ type preparedAgentCall struct {
 	ResponseFormat        *ResponseFormat
 	PrepareStep           func(PrepareStepOptions) (*PrepareStepResult, error)
 	Telemetry             Telemetry
+	Transforms            []StreamTransform
 }
 
 func (a *ToolLoopAgent) prepareCall(opts AgentCallOptions) (preparedAgentCall, error) {
@@ -298,6 +303,7 @@ func (a *ToolLoopAgent) prepareCall(opts AgentCallOptions) (preparedAgentCall, e
 		ResponseFormat:        firstResponseFormat(opts.ResponseFormat, settings.ResponseFormat),
 		PrepareStep:           firstPrepareStep(opts.PrepareStep, settings.PrepareStep),
 		Telemetry:             firstTelemetry(opts.Telemetry, settings.Telemetry),
+		Transforms:            settings.Transforms,
 	}
 	activeTools := settings.ActiveTools
 	if len(opts.Tools) > 0 {
@@ -400,6 +406,9 @@ func applyPreparedAgentCall(call *preparedAgentCall, prepared *AgentPreparedCall
 	}
 	if prepared.Telemetry != nil {
 		call.Telemetry = prepared.Telemetry
+	}
+	if prepared.Transforms != nil {
+		call.Transforms = prepared.Transforms
 	}
 }
 
@@ -537,6 +546,15 @@ func firstPrepareStep(values ...func(PrepareStepOptions) (*PrepareStepResult, er
 func firstTelemetry(values ...Telemetry) Telemetry {
 	for _, value := range values {
 		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func firstStreamTransforms(values ...[]StreamTransform) []StreamTransform {
+	for _, value := range values {
+		if len(value) > 0 {
 			return value
 		}
 	}

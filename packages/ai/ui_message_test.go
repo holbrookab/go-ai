@@ -199,6 +199,79 @@ func TestValidateUIMessagesRejectsInvalidToolOutputSchema(t *testing.T) {
 	}
 }
 
+func TestValidateUIMessagesRejectsInvalidDynamicToolSchemas(t *testing.T) {
+	tools := map[string]Tool{
+		"weather": {
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"city": map[string]any{"type": "string"}},
+			},
+			OutputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"forecast": map[string]any{"type": "string"}},
+			},
+		},
+	}
+	err := ValidateUIMessages([]UIMessage{{
+		ID:   "1",
+		Role: RoleAssistant,
+		Parts: []UIPart{{
+			Type:       "dynamic-tool",
+			ToolName:   "weather",
+			ToolCallID: "call-1",
+			State:      "input-available",
+			Input:      map[string]any{"city": 123},
+			Dynamic:    true,
+		}},
+	}}, ValidateUIMessagesOptions{Tools: tools})
+	if !errors.Is(err, ErrInvalidUIMessage) {
+		t.Fatalf("expected invalid dynamic tool input, got %v", err)
+	}
+
+	err = ValidateUIMessages([]UIMessage{{
+		ID:   "1",
+		Role: RoleAssistant,
+		Parts: []UIPart{{
+			Type:       "dynamic-tool",
+			ToolName:   "weather",
+			ToolCallID: "call-1",
+			State:      "output-available",
+			Input:      map[string]any{"city": "NYC"},
+			Output:     map[string]any{"forecast": 42},
+			Dynamic:    true,
+		}},
+	}}, ValidateUIMessagesOptions{Tools: tools})
+	if !errors.Is(err, ErrInvalidUIMessage) {
+		t.Fatalf("expected invalid dynamic tool output, got %v", err)
+	}
+}
+
+func TestConvertToModelMessagesValidatesToolSchemas(t *testing.T) {
+	_, err := ConvertToModelMessages([]UIMessage{{
+		ID:   "1",
+		Role: RoleAssistant,
+		Parts: []UIPart{{
+			Type:       "tool-weather",
+			ToolCallID: "call-1",
+			State:      "output-available",
+			Input:      map[string]any{"city": "NYC"},
+			Output:     map[string]any{"forecast": 42},
+		}},
+	}}, ConvertToModelMessagesOptions{
+		Tools: map[string]Tool{
+			"weather": {
+				OutputSchema: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"forecast": map[string]any{"type": "string"}},
+				},
+			},
+		},
+	})
+	if !errors.Is(err, ErrInvalidUIMessage) {
+		t.Fatalf("expected conversion validation error, got %v", err)
+	}
+}
+
 func TestSafeValidateUIMessagesReturnsErrorResult(t *testing.T) {
 	result := SafeValidateUIMessages(nil)
 	if result.Success || result.Error == nil {

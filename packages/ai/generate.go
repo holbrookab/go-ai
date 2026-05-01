@@ -46,6 +46,7 @@ func GenerateText(ctx context.Context, opts GenerateTextOptions) (result *Genera
 	var clientToolCalls []ToolCall
 	var clientToolResults []ToolResultPart
 	pendingProviderResults := map[string]ToolCall{}
+	toolsContext := map[string]any{}
 
 	for {
 		stepCtx := ctx
@@ -66,13 +67,17 @@ func GenerateText(ctx context.Context, opts GenerateTextOptions) (result *Genera
 			stepTools = FilterActiveTools(stepTools, opts.ActiveTools)
 		}
 		toolChoice := opts.ToolChoice
+		if err := validatePreparedTools(opts.Tools, opts.ActiveTools, toolChoice); err != nil {
+			return nil, err
+		}
 		providerOptions := cloneProviderOptions(opts.ProviderOptions)
 		if opts.PrepareStep != nil {
 			prepared, err := opts.PrepareStep(PrepareStepOptions{
-				Model:      model,
-				Steps:      steps,
-				StepNumber: stepNumber,
-				Messages:   append(stepMessages, responseMessages...),
+				Model:        model,
+				Steps:        steps,
+				StepNumber:   stepNumber,
+				Messages:     append(stepMessages, responseMessages...),
+				ToolsContext: cloneAnyMap(toolsContext),
 			})
 			if err != nil {
 				return nil, err
@@ -94,7 +99,11 @@ func GenerateText(ctx context.Context, opts GenerateTextOptions) (result *Genera
 					toolChoice = prepared.ToolChoice
 				}
 				providerOptions = mergeProviderOptions(providerOptions, prepared.ProviderOptions)
+				toolsContext = mergeToolsContext(toolsContext, prepared.ToolsContext)
 			}
+		}
+		if err := validatePreparedTools(stepTools, nil, toolChoice); err != nil {
+			return nil, err
 		}
 
 		conversionOptions, err := promptConversionOptionsForModel(stepCtx, model)
@@ -196,7 +205,7 @@ func GenerateText(ctx context.Context, opts GenerateTextOptions) (result *Genera
 			if blocked[call.ToolCallID] {
 				continue
 			}
-			result := executeTool(stepCtx, opts.Timeout.Tool, call, stepTools[call.ToolName], promptMessages, opts.OnToolExecutionStart, opts.OnToolExecutionEnd)
+			result := executeTool(stepCtx, opts.Timeout.Tool, call, stepTools[call.ToolName], promptMessages, cloneAnyMap(toolsContext), opts.OnToolExecutionStart, opts.OnToolExecutionEnd)
 			clientToolResults = append(clientToolResults, result)
 		}
 		for _, part := range parsedContent {
@@ -307,6 +316,35 @@ func prepareModelTools(tools map[string]Tool, choice ToolChoice) []ModelTool {
 	return out
 }
 
+func validatePreparedTools(tools map[string]Tool, activeTools []string, choice ToolChoice) error {
+	if len(activeTools) > 0 {
+		for _, name := range activeTools {
+			if _, ok := tools[name]; !ok {
+				return &SDKError{Kind: ErrNoSuchTool, Message: fmt.Sprintf("active tool %q is not defined", name)}
+			}
+		}
+	}
+	if choice.Type == "tool" && choice.ToolName != "" {
+		if _, ok := tools[choice.ToolName]; !ok {
+			return NewNoSuchToolError(choice.ToolName, availableToolNames(tools))
+		}
+	}
+	for name, tool := range tools {
+		if name == "" {
+			return &SDKError{Kind: ErrInvalidArgument, Message: "tool name must not be empty"}
+		}
+		if tool.Type == "provider" && tool.ID == "" {
+			return &SDKError{Kind: ErrInvalidArgument, Message: fmt.Sprintf("provider tool %q requires an id", name)}
+		}
+		if tool.Type != "provider" && tool.InputSchema != nil {
+			if _, ok := normalizeSchema(tool.InputSchema).(map[string]any); !ok {
+				return &SDKError{Kind: ErrInvalidArgument, Message: fmt.Sprintf("tool %q input schema must be a JSON schema object", name)}
+			}
+		}
+	}
+	return nil
+}
+
 func normalizeToolChoice(choice ToolChoice) ToolChoice {
 	if choice.Type == "" {
 		return AutoToolChoice()
@@ -396,8 +434,8 @@ func parseToolCallWithoutRepair(toolPart ToolCallPart, tools map[string]Tool) To
 	call.Input = input
 	if tool, ok := tools[call.ToolName]; ok {
 		call.ProviderMetadata = mergeMetadata(tool.ProviderMetadata, call.ProviderMetadata)
-		if tool.ValidateInput != nil && !call.Invalid {
-			if err := tool.ValidateInput(input); err != nil {
+		if !call.Invalid {
+			if err := ValidateToolInput(tool, input); err != nil {
 				call.Invalid = true
 				call.Error = &SDKError{Kind: ErrInvalidToolInput, Message: "tool input validation failed", Cause: err}
 			}
@@ -436,7 +474,7 @@ func availableToolNames(tools map[string]Tool) []string {
 	return names
 }
 
-func executeTool(ctx context.Context, timeout time.Duration, call ToolCall, tool Tool, messages []Message, onStart func(ToolExecutionStartEvent), onEnd func(ToolExecutionEndEvent)) ToolResultPart {
+func executeTool(ctx context.Context, timeout time.Duration, call ToolCall, tool Tool, messages []Message, toolsContext map[string]any, onStart func(ToolExecutionStartEvent), onEnd func(ToolExecutionEndEvent)) ToolResultPart {
 	execCtx := ctx
 	var cancel context.CancelFunc
 	if timeout > 0 {
@@ -446,7 +484,7 @@ func executeTool(ctx context.Context, timeout time.Duration, call ToolCall, tool
 	if onStart != nil {
 		onStart(ToolExecutionStartEvent{ToolCall: call, Messages: append([]Message(nil), messages...)})
 	}
-	output, err := tool.Execute(execCtx, call, ToolExecutionOptions{ToolCallID: call.ToolCallID, Messages: messages})
+	output, err := tool.Execute(execCtx, call, ToolExecutionOptions{ToolCallID: call.ToolCallID, Messages: messages, Context: toolsContext})
 	modelOutput, modelErr := CreateToolModelOutput(tool, call.ToolCallID, call.Input, firstNonNil(output, errString(err)), err != nil)
 	if modelErr != nil {
 		err = modelErr
@@ -466,6 +504,17 @@ func executeTool(ctx context.Context, timeout time.Duration, call ToolCall, tool
 		onEnd(ToolExecutionEndEvent{ToolCall: call, Result: result, Err: err})
 	}
 	return result
+}
+
+func mergeToolsContext(base map[string]any, overrides map[string]any) map[string]any {
+	if len(base) == 0 && len(overrides) == 0 {
+		return map[string]any{}
+	}
+	out := cloneAnyMap(base)
+	for key, value := range overrides {
+		out[key] = value
+	}
+	return out
 }
 
 func toResponseMessages(content []Part, toolResults []ToolResultPart) []Message {

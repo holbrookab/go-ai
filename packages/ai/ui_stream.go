@@ -128,26 +128,38 @@ func IsErrorUIMessageChunk(chunk UIMessageChunk) bool {
 }
 
 type UIMessageStreamWriter struct {
+	ctx     context.Context
 	out     chan<- UIMessageChunk
 	onError func(error) string
 	wg      *sync.WaitGroup
 }
 
-func (w UIMessageStreamWriter) Write(chunk UIMessageChunk) {
-	safeWriteUIMessageChunk(w.out, chunk)
+func (w UIMessageStreamWriter) Write(chunk UIMessageChunk) bool {
+	return safeWriteUIMessageChunkContext(w.ctx, w.out, chunk)
 }
 
-func (w UIMessageStreamWriter) Merge(stream <-chan UIMessageChunk) {
+func (w UIMessageStreamWriter) Merge(stream <-chan UIMessageChunk) bool {
 	if stream == nil {
-		return
+		return false
 	}
 	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()
-		for chunk := range stream {
-			safeWriteUIMessageChunk(w.out, chunk)
+		for {
+			select {
+			case <-w.ctx.Done():
+				return
+			case chunk, ok := <-stream:
+				if !ok {
+					return
+				}
+				if !safeWriteUIMessageChunkContext(w.ctx, w.out, chunk) {
+					return
+				}
+			}
 		}
 	}()
+	return true
 }
 
 func (w UIMessageStreamWriter) OnError(err error) string {
@@ -158,6 +170,7 @@ func (w UIMessageStreamWriter) OnError(err error) string {
 }
 
 type CreateUIMessageStreamOptions struct {
+	Context           context.Context
 	Execute           func(writer UIMessageStreamWriter) error
 	OnError           func(error) string
 	BufferSize        int
@@ -169,6 +182,11 @@ type CreateUIMessageStreamOptions struct {
 }
 
 func CreateUIMessageStream(opts CreateUIMessageStreamOptions) <-chan UIMessageChunk {
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
 	bufferSize := opts.BufferSize
 	if bufferSize < 0 {
 		bufferSize = 0
@@ -179,13 +197,14 @@ func CreateUIMessageStream(opts CreateUIMessageStreamOptions) <-chan UIMessageCh
 		onError = defaultUIMessageStreamErrorText
 	}
 	var wg sync.WaitGroup
-	writer := UIMessageStreamWriter{out: out, onError: onError, wg: &wg}
+	writer := UIMessageStreamWriter{ctx: ctx, out: out, onError: onError, wg: &wg}
 
 	go func() {
+		defer cancel()
 		defer close(out)
 		if opts.Execute != nil {
 			if err := opts.Execute(writer); err != nil {
-				safeWriteUIMessageChunk(out, UIMessageChunk{
+				safeWriteUIMessageChunkContext(ctx, out, UIMessageChunk{
 					Type:      UIMessageChunkTypeError,
 					ErrorText: onError(err),
 					Err:       err,
@@ -214,6 +233,7 @@ func CreateUIMessageStream(opts CreateUIMessageStreamOptions) <-chan UIMessageCh
 				opts.OnError(err)
 			}
 		},
+		Context:    ctx,
 		BufferSize: opts.BufferSize,
 	})
 }
@@ -409,6 +429,13 @@ func CreateUIMessageStreamResponse(ctx context.Context, stream <-chan UIMessageC
 }
 
 func PipeUIMessageStreamToResponse(w http.ResponseWriter, stream <-chan UIMessageChunk, opts UIMessageStreamResponseOptions) error {
+	return PipeUIMessageStreamToResponseContext(context.Background(), w, stream, opts)
+}
+
+func PipeUIMessageStreamToResponseContext(ctx context.Context, w http.ResponseWriter, stream <-chan UIMessageChunk, opts UIMessageStreamResponseOptions) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	format := opts.Format
 	if format == "" {
 		format = UIMessageStreamFormatSSE
@@ -417,7 +444,7 @@ func PipeUIMessageStreamToResponse(w http.ResponseWriter, stream <-chan UIMessag
 	if opts.Status != 0 {
 		w.WriteHeader(opts.Status)
 	}
-	return writeUIMessageStream(context.Background(), w, stream, opts, w)
+	return writeUIMessageStream(ctx, w, stream, opts, w)
 }
 
 func writeUIMessageStream(ctx context.Context, w io.Writer, stream <-chan UIMessageChunk, opts UIMessageStreamResponseOptions, responseWriter http.ResponseWriter) error {
@@ -457,7 +484,9 @@ func writeUIMessageStream(ctx context.Context, w io.Writer, stream <-chan UIMess
 			if err != nil {
 				return err
 			}
-			consumer.send(event)
+			if !consumer.send(ctx, event) {
+				return ctx.Err()
+			}
 			if _, err := io.WriteString(w, event); err != nil {
 				return err
 			}
@@ -465,15 +494,20 @@ func writeUIMessageStream(ctx context.Context, w io.Writer, stream <-chan UIMess
 		if flusher != nil {
 			flusher.Flush()
 		}
-		if chunk.Err != nil {
+		if IsErrorUIMessageChunk(chunk) {
 			streamErr = chunk.Err
+			if streamErr == nil {
+				streamErr = NewUIMessageStreamError(chunk.Type, chunkIDForValidation(chunk), chunk.ErrorText)
+			}
 			break
 		}
 	}
 done:
 	if format == UIMessageStreamFormatSSE {
 		done := "data: [DONE]\n\n"
-		consumer.send(done)
+		if !consumer.send(ctx, done) {
+			return ctx.Err()
+		}
 		if _, err := io.WriteString(w, done); err != nil {
 			return err
 		}
@@ -489,6 +523,21 @@ func safeWriteUIMessageChunk(out chan<- UIMessageChunk, chunk UIMessageChunk) {
 		_ = recover()
 	}()
 	out <- chunk
+}
+
+func safeWriteUIMessageChunkContext(ctx context.Context, out chan<- UIMessageChunk, chunk UIMessageChunk) bool {
+	defer func() {
+		_ = recover()
+	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case out <- chunk:
+		return true
+	}
 }
 
 func defaultUIMessageStreamErrorText(err error) string {
@@ -539,22 +588,18 @@ func startSSEConsumer(opts UIMessageStreamResponseOptions) *sseConsumer {
 	return &sseConsumer{ch: ch}
 }
 
-func (c *sseConsumer) send(event string) {
+func (c *sseConsumer) send(ctx context.Context, event string) bool {
 	if c == nil {
-		return
+		return true
 	}
 	defer func() {
 		_ = recover()
 	}()
 	select {
+	case <-ctx.Done():
+		return false
 	case c.ch <- event:
-	default:
-		go func() {
-			defer func() {
-				_ = recover()
-			}()
-			c.ch <- event
-		}()
+		return true
 	}
 }
 

@@ -132,6 +132,8 @@ type StreamTextResult struct {
 	Steps            []*StepResult
 	ToolCalls        []ToolCall
 	ToolResults      []ToolResultPart
+	Aborted          bool
+	AbortReason      string
 }
 
 type GenerateObjectOptions struct {
@@ -204,6 +206,7 @@ type GenerateObjectResult struct {
 
 type StreamObjectResult struct {
 	Stream   <-chan ObjectStreamPart
+	Elements <-chan any
 	Request  RequestMetadata
 	Response ResponseMetadata
 }
@@ -212,11 +215,13 @@ type ObjectStreamPart struct {
 	Type             string
 	TextDelta        string
 	Object           any
+	Element          any
 	FinishReason     FinishReason
 	Usage            Usage
 	Warnings         []Warning
 	ProviderMetadata ProviderMetadata
 	Raw              any
+	AbortReason      string
 	Err              error
 }
 

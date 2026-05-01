@@ -63,6 +63,7 @@ func CollectTextStream(ctx context.Context, stream <-chan string) (string, error
 func TransformTextToUIMessageStream(ctx context.Context, stream <-chan string, options ...TextToUIMessageStreamOptions) <-chan UIMessageChunk {
 	opts := firstTextToUIMessageStreamOptions(options)
 	return CreateUIMessageStream(CreateUIMessageStreamOptions{
+		Context:    ctx,
 		BufferSize: opts.BufferSize,
 		Execute: func(writer UIMessageStreamWriter) error {
 			writeTextUIMessageStreamStart(writer, opts)
@@ -85,6 +86,7 @@ func TransformTextToUIMessageStream(ctx context.Context, stream <-chan string, o
 func TextReaderToUIMessageStream(ctx context.Context, reader io.Reader, options ...TextToUIMessageStreamOptions) <-chan UIMessageChunk {
 	opts := firstTextToUIMessageStreamOptions(options)
 	return CreateUIMessageStream(CreateUIMessageStreamOptions{
+		Context:    ctx,
 		BufferSize: opts.BufferSize,
 		Execute: func(writer UIMessageStreamWriter) error {
 			writeTextUIMessageStreamStart(writer, opts)
@@ -136,6 +138,7 @@ type ProcessUIMessageStreamOptions struct {
 	MessageID             string
 	MessageMetadataSchema any
 	DataSchemas           map[string]any
+	Tools                 map[string]Tool
 	OnError               func(error)
 	OnToolCall            func(UIMessageChunk) error
 	OnData                func(UIPart)
@@ -157,6 +160,7 @@ type UIMessageStreamFinishEvent struct {
 }
 
 type HandleUIMessageStreamFinishOptions struct {
+	Context          context.Context
 	MessageID        string
 	OriginalMessages []UIMessage
 	OnError          func(error)
@@ -173,7 +177,7 @@ func ProcessUIMessageStream(ctx context.Context, stream <-chan UIMessageChunk, o
 		for {
 			select {
 			case <-ctx.Done():
-				safeWriteUIMessageChunk(out, ErrorUIMessageChunk(ctx.Err()))
+				safeWriteUIMessageChunkContext(ctx, out, ErrorUIMessageChunk(ctx.Err()))
 				if opts.OnError != nil {
 					opts.OnError(ctx.Err())
 				}
@@ -183,14 +187,14 @@ func ProcessUIMessageStream(ctx context.Context, stream <-chan UIMessageChunk, o
 					return
 				}
 				if err := validateUIMessageStreamChunkSchemas(state, chunk, opts); err != nil {
-					safeWriteUIMessageChunk(out, ErrorUIMessageChunk(err))
+					safeWriteUIMessageChunkContext(ctx, out, ErrorUIMessageChunk(err))
 					if opts.OnError != nil {
 						opts.OnError(err)
 					}
 					continue
 				}
 				if err := ApplyUIMessageChunk(state, chunk); err != nil {
-					safeWriteUIMessageChunk(out, ErrorUIMessageChunk(err))
+					safeWriteUIMessageChunkContext(ctx, out, ErrorUIMessageChunk(err))
 					if opts.OnError != nil {
 						opts.OnError(err)
 					}
@@ -207,7 +211,7 @@ func ProcessUIMessageStream(ctx context.Context, stream <-chan UIMessageChunk, o
 				}
 				if chunk.Type == UIMessageChunkTypeToolInputAvailable && opts.OnToolCall != nil && !boolPtrValue(chunk.ProviderExecuted) {
 					if err := opts.OnToolCall(chunk); err != nil {
-						safeWriteUIMessageChunk(out, ErrorUIMessageChunk(err))
+						safeWriteUIMessageChunkContext(ctx, out, ErrorUIMessageChunk(err))
 						if opts.OnError != nil {
 							opts.OnError(err)
 						}
@@ -217,7 +221,7 @@ func ProcessUIMessageStream(ctx context.Context, stream <-chan UIMessageChunk, o
 				if IsDataUIMessageChunk(chunk) && opts.OnData != nil {
 					opts.OnData(UIPart{Type: chunk.Type, ID: chunk.ID, Data: chunk.Data})
 				}
-				safeWriteUIMessageChunk(out, chunk)
+				safeWriteUIMessageChunkContext(ctx, out, chunk)
 			}
 		}
 	}()
@@ -225,6 +229,10 @@ func ProcessUIMessageStream(ctx context.Context, stream <-chan UIMessageChunk, o
 }
 
 func HandleUIMessageStreamFinish(stream <-chan UIMessageChunk, opts HandleUIMessageStreamFinishOptions) <-chan UIMessageChunk {
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	out := make(chan UIMessageChunk, opts.BufferSize)
 	go func() {
 		defer close(out)
@@ -271,7 +279,18 @@ func HandleUIMessageStreamFinish(stream <-chan UIMessageChunk, opts HandleUIMess
 		}
 		defer callOnFinish()
 
-		for chunk := range stream {
+		for {
+			var chunk UIMessageChunk
+			var ok bool
+			select {
+			case <-ctx.Done():
+				isAborted = true
+				return
+			case chunk, ok = <-stream:
+				if !ok {
+					return
+				}
+			}
 			if chunk.Type == UIMessageChunkTypeStart && chunk.MessageID == "" && messageID != "" {
 				chunk.MessageID = messageID
 			}
@@ -280,14 +299,14 @@ func HandleUIMessageStreamFinish(stream <-chan UIMessageChunk, opts HandleUIMess
 			}
 			if processCallbacks {
 				if err := ValidateUIMessageChunk(chunk); err != nil {
-					safeWriteUIMessageChunk(out, ErrorUIMessageChunk(err))
+					safeWriteUIMessageChunkContext(ctx, out, ErrorUIMessageChunk(err))
 					if opts.OnError != nil {
 						opts.OnError(err)
 					}
 					continue
 				}
 				if err := ApplyUIMessageChunk(state, chunk); err != nil {
-					safeWriteUIMessageChunk(out, ErrorUIMessageChunk(err))
+					safeWriteUIMessageChunkContext(ctx, out, ErrorUIMessageChunk(err))
 					if opts.OnError != nil {
 						opts.OnError(err)
 					}
@@ -306,7 +325,10 @@ func HandleUIMessageStreamFinish(stream <-chan UIMessageChunk, opts HandleUIMess
 					callOnStepFinish()
 				}
 			}
-			safeWriteUIMessageChunk(out, chunk)
+			if !safeWriteUIMessageChunkContext(ctx, out, chunk) {
+				isAborted = true
+				return
+			}
 		}
 	}()
 	return out
@@ -591,6 +613,40 @@ func validateUIMessageStreamChunkSchemas(state *StreamingUIMessageState, chunk U
 		}
 	}
 
+	if opts.Tools != nil {
+		if err := validateUIStreamToolChunk(state, chunk, opts.Tools); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateUIStreamToolChunk(state *StreamingUIMessageState, chunk UIMessageChunk, tools map[string]Tool) error {
+	switch chunk.Type {
+	case UIMessageChunkTypeToolInputAvailable:
+		tool, ok := tools[chunk.ToolName]
+		if !ok {
+			return NewUIMessageStreamError(chunk.Type, chunk.ToolCallID, fmt.Sprintf("tool input validation failed: no tool schema found for %q", chunk.ToolName))
+		}
+		if err := ValidateToolInput(tool, chunk.Input); err != nil {
+			return NewUIMessageStreamError(chunk.Type, chunk.ToolCallID, fmt.Sprintf("tool input validation failed: %v", err))
+		}
+	case UIMessageChunkTypeToolOutputAvailable:
+		toolName := chunk.ToolName
+		if toolName == "" && state != nil {
+			if part, err := getStreamingToolPart(state, chunk.ToolCallID); err == nil {
+				toolName = ToolName(*part)
+			}
+		}
+		tool, ok := tools[toolName]
+		if !ok {
+			return NewUIMessageStreamError(chunk.Type, chunk.ToolCallID, fmt.Sprintf("tool output validation failed: no tool schema found for %q", toolName))
+		}
+		if err := ValidateToolOutput(tool, chunk.Output); err != nil {
+			return NewUIMessageStreamError(chunk.Type, chunk.ToolCallID, fmt.Sprintf("tool output validation failed: %v", err))
+		}
+	}
 	return nil
 }
 

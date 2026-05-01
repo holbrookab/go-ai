@@ -71,6 +71,48 @@ func TestToLanguageModelPromptReturnsTypedMissingToolResults(t *testing.T) {
 	}
 }
 
+func TestStandardizePromptRejectsInvalidToolCallAndResultParts(t *testing.T) {
+	cases := []Message{
+		{Role: RoleAssistant, Content: []Part{ToolCallPart{ToolName: "weather", InputRaw: `{}`}}},
+		{Role: RoleAssistant, Content: []Part{ToolCallPart{ToolCallID: "call-1", InputRaw: `{}`}}},
+		{Role: RoleAssistant, Content: []Part{ToolCallPart{ToolCallID: "call-1", ToolName: "weather", InputRaw: `{`}}},
+		{Role: RoleAssistant, Content: []Part{ToolResultPart{ToolCallID: "call-1", ToolName: "weather"}}},
+		{Role: RoleTool, Content: []Part{ToolResultPart{ToolName: "weather"}}},
+	}
+	for _, message := range cases {
+		if _, err := standardizePrompt("", "", []Message{message}, true); !errors.Is(err, ErrInvalidPrompt) {
+			t.Fatalf("expected invalid prompt for %#v, got %v", message, err)
+		}
+	}
+}
+
+func TestToLanguageModelPromptRejectsOrphanToolResult(t *testing.T) {
+	_, err := toLanguageModelPrompt(standardizedPrompt{Messages: []Message{{
+		Role: RoleTool,
+		Content: []Part{ToolResultPart{
+			ToolCallID: "call-1",
+			ToolName:   "weather",
+			Output:     ToolResultOutput{Type: "text", Value: "sunny"},
+		}},
+	}}}, nil)
+	if !errors.Is(err, ErrMissingToolResults) {
+		t.Fatalf("expected missing tool result error, got %v", err)
+	}
+}
+
+func TestToLanguageModelPromptAllowsProviderExecutedAssistantResult(t *testing.T) {
+	_, err := toLanguageModelPrompt(standardizedPrompt{Messages: []Message{{
+		Role: RoleAssistant,
+		Content: []Part{
+			ToolCallPart{ToolCallID: "call-1", ToolName: "code_execution", ProviderExecuted: true},
+			ToolResultPart{ToolCallID: "call-1", ToolName: "code_execution", ProviderExecuted: true},
+		},
+	}}}, nil)
+	if err != nil {
+		t.Fatalf("provider-executed assistant tool result should be allowed: %v", err)
+	}
+}
+
 func TestToLanguageModelPromptDownloadsUnsupportedURLFileParts(t *testing.T) {
 	prompt := standardizedPrompt{Messages: []Message{{
 		Role: RoleUser,

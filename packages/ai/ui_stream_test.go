@@ -84,6 +84,44 @@ func TestCreateUIMessageStreamConvertsExecuteErrorToChunk(t *testing.T) {
 	}
 }
 
+func TestCreateUIMessageStreamWriterStopsOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stream := CreateUIMessageStream(CreateUIMessageStreamOptions{
+		Context: ctx,
+		Execute: func(writer UIMessageStreamWriter) error {
+			cancel()
+			if writer.Write(TextDeltaUIMessageChunk("text-1", "late")) {
+				t.Fatalf("expected canceled writer to reject write")
+			}
+			return nil
+		},
+	})
+	chunks, err := ReadUIMessageStream(stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 0 {
+		t.Fatalf("expected no chunks after cancellation, got %#v", chunks)
+	}
+}
+
+func TestWriteUIMessageStreamResponseTreatsErrorTextChunkAsTerminal(t *testing.T) {
+	stream := make(chan UIMessageChunk, 2)
+	stream <- UIMessageChunk{Type: UIMessageChunkTypeError, ErrorText: "boom"}
+	stream <- TextDeltaUIMessageChunk("text-1", "late")
+	close(stream)
+
+	rec := httptest.NewRecorder()
+	err := WriteUIMessageStreamResponse(rec, stream, UIMessageStreamResponseOptions{})
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("expected terminal error chunk, got %v", err)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "late") {
+		t.Fatalf("stream continued after error chunk:\n%s", body)
+	}
+}
+
 func TestUIMessageChunkHelpers(t *testing.T) {
 	if !IsStartUIMessageChunk(StartUIMessageChunk("message-1")) {
 		t.Fatalf("expected start chunk")

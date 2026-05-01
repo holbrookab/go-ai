@@ -112,6 +112,80 @@ func TestProcessUIMessageStreamForwardsChunksAndState(t *testing.T) {
 	}
 }
 
+func TestProcessUIMessageStreamValidatesToolSchemas(t *testing.T) {
+	stream := make(chan UIMessageChunk, 1)
+	stream <- UIMessageChunk{
+		Type:       UIMessageChunkTypeToolInputAvailable,
+		ToolCallID: "call-1",
+		ToolName:   "weather",
+		Input:      map[string]any{"city": 123},
+	}
+	close(stream)
+
+	var sawError error
+	out, _ := ProcessUIMessageStream(context.Background(), stream, ProcessUIMessageStreamOptions{
+		MessageID: "message-1",
+		Tools: map[string]Tool{
+			"weather": {
+				InputSchema: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"city": map[string]any{"type": "string"}},
+				},
+			},
+		},
+		OnError: func(err error) {
+			sawError = err
+		},
+	})
+	chunks, err := ReadUIMessageStream(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sawError == nil {
+		t.Fatalf("expected OnError")
+	}
+	if len(chunks) != 1 || chunks[0].Type != UIMessageChunkTypeError {
+		t.Fatalf("expected error chunk, got %#v", chunks)
+	}
+}
+
+func TestProcessUIMessageStreamValidatesDynamicToolOutputSchema(t *testing.T) {
+	stream := make(chan UIMessageChunk, 2)
+	dynamic := true
+	stream <- UIMessageChunk{
+		Type:       UIMessageChunkTypeToolInputAvailable,
+		ToolCallID: "call-1",
+		ToolName:   "weather",
+		Dynamic:    &dynamic,
+		Input:      map[string]any{"city": "NYC"},
+	}
+	stream <- UIMessageChunk{
+		Type:       UIMessageChunkTypeToolOutputAvailable,
+		ToolCallID: "call-1",
+		Output:     map[string]any{"forecast": 42},
+	}
+	close(stream)
+
+	out, _ := ProcessUIMessageStream(context.Background(), stream, ProcessUIMessageStreamOptions{
+		MessageID: "message-1",
+		Tools: map[string]Tool{
+			"weather": {
+				OutputSchema: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"forecast": map[string]any{"type": "string"}},
+				},
+			},
+		},
+	})
+	chunks, err := ReadUIMessageStream(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 2 || chunks[1].Type != UIMessageChunkTypeError {
+		t.Fatalf("expected dynamic output error chunk, got %#v", chunks)
+	}
+}
+
 func TestProcessUIMessageStreamCallsOnDataForTransientParts(t *testing.T) {
 	transient := true
 	input := make(chan UIMessageChunk, 1)

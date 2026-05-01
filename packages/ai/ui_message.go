@@ -162,7 +162,7 @@ type ConvertToModelMessagesOptions struct {
 }
 
 func ConvertToModelMessages(messages []UIMessage, opts ConvertToModelMessagesOptions) ([]Message, error) {
-	if err := ValidateUIMessages(messages); err != nil {
+	if err := ValidateUIMessages(messages, ValidateUIMessagesOptions{Tools: opts.Tools}); err != nil {
 		return nil, err
 	}
 
@@ -609,8 +609,8 @@ func validateUIPartWithSchemas(messageIndex, partIndex int, part UIPart, opts Va
 		}
 	}
 
-	if opts.Tools != nil && IsStaticToolUIPart(part) {
-		toolName := StaticToolName(part)
+	if opts.Tools != nil && IsToolUIPart(part) {
+		toolName := ToolName(part)
 		tool, ok := opts.Tools[toolName]
 		if !ok && (part.State == "output-available" || part.State == "output-error" || part.State == "output-denied") {
 			return nil
@@ -654,31 +654,11 @@ func validateUIPartWithSchemas(messageIndex, partIndex int, part UIPart, opts Va
 }
 
 func validateUIToolInput(tool Tool, input any) error {
-	if tool.InputSchema != nil {
-		if err := validateUIValueAgainstSchema(tool.InputSchema, input); err != nil {
-			return err
-		}
-	}
-	if tool.ValidateInput != nil {
-		if err := tool.ValidateInput(input); err != nil {
-			return err
-		}
-	}
-	return nil
+	return ValidateToolInput(tool, input)
 }
 
 func validateUIToolOutput(tool Tool, output any) error {
-	if tool.OutputSchema != nil {
-		if err := validateUIValueAgainstSchema(tool.OutputSchema, output); err != nil {
-			return err
-		}
-	}
-	if tool.ValidateOutput != nil {
-		if err := tool.ValidateOutput(output); err != nil {
-			return err
-		}
-	}
-	return nil
+	return ValidateToolOutput(tool, output)
 }
 
 func lookupUIDataSchema(schemas map[string]any, partType string) (any, bool) {

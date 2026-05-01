@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -59,8 +60,18 @@ func streamText(ctx context.Context, cancel context.CancelFunc, opts StreamTextO
 	responseMessages := []Message{}
 	var last *StepResult
 	pendingProviderResults := map[string]ToolCall{}
+	toolsContext := map[string]any{}
 
 	for {
+		select {
+		case <-ctx.Done():
+			emitAbort(ctx, opts, out, ctx.Err())
+			result.Aborted = true
+			result.AbortReason = abortReason(ctx.Err())
+			return
+		default:
+		}
+
 		stepCtx := ctx
 		var cancelStep context.CancelFunc
 		if opts.Timeout.Step > 0 {
@@ -76,13 +87,21 @@ func streamText(ctx context.Context, cancel context.CancelFunc, opts StreamTextO
 			stepTools = FilterActiveTools(stepTools, opts.ActiveTools)
 		}
 		toolChoice := opts.ToolChoice
+		if err := validatePreparedTools(opts.Tools, opts.ActiveTools, toolChoice); err != nil {
+			if cancelStep != nil {
+				cancelStep()
+			}
+			sendStreamError(ctx, opts, out, err)
+			return
+		}
 		providerOptions := cloneProviderOptions(opts.ProviderOptions)
 		if opts.PrepareStep != nil {
 			prepared, err := opts.PrepareStep(PrepareStepOptions{
-				Model:      model,
-				Steps:      result.Steps,
-				StepNumber: stepNumber,
-				Messages:   append(stepMessages, responseMessages...),
+				Model:        model,
+				Steps:        result.Steps,
+				StepNumber:   stepNumber,
+				Messages:     append(stepMessages, responseMessages...),
+				ToolsContext: cloneAnyMap(toolsContext),
 			})
 			if err != nil {
 				if cancelStep != nil {
@@ -108,7 +127,15 @@ func streamText(ctx context.Context, cancel context.CancelFunc, opts StreamTextO
 					toolChoice = prepared.ToolChoice
 				}
 				providerOptions = mergeProviderOptions(providerOptions, prepared.ProviderOptions)
+				toolsContext = mergeToolsContext(toolsContext, prepared.ToolsContext)
 			}
+		}
+		if err := validatePreparedTools(stepTools, nil, toolChoice); err != nil {
+			if cancelStep != nil {
+				cancelStep()
+			}
+			sendStreamError(ctx, opts, out, err)
+			return
 		}
 
 		conversionOptions, err := promptConversionOptionsForModel(stepCtx, model)
@@ -166,6 +193,12 @@ func streamText(ctx context.Context, cancel context.CancelFunc, opts StreamTextO
 			if cancelStep != nil {
 				cancelStep()
 			}
+			if isAbortError(err) {
+				emitAbort(ctx, opts, out, err)
+				result.Aborted = true
+				result.AbortReason = abortReason(err)
+				return
+			}
 			sendStreamError(ctx, opts, out, err)
 			return
 		}
@@ -189,10 +222,18 @@ func streamText(ctx context.Context, cancel context.CancelFunc, opts StreamTextO
 				cancelStep()
 			}
 		})
-		accumulated := consumeStreamStep(stepCtx, opts, streamResult, system, promptMessages, stepTools, out)
+		accumulated := consumeStreamStep(stepCtx, opts, streamResult, system, promptMessages, stepTools, cloneAnyMap(toolsContext), out)
 		emitLanguageModelStreamCallEnd(ctx, opts.Telemetry, opts.TelemetryOptions, OperationStreamText, model, stepNumber, callID, streamResult, accumulated)
 		if cancelStep != nil {
 			cancelStep()
+		}
+		if accumulated.aborted {
+			result.Request = streamResult.Request
+			result.Response = streamResult.Response
+			result.Aborted = true
+			result.AbortReason = accumulated.abortReason
+			emitAbort(ctx, opts, out, accumulated.abortErr)
+			return
 		}
 		if accumulated.err != nil {
 			result.Request = streamResult.Request
@@ -311,18 +352,35 @@ type streamStepAccumulation struct {
 	warnings         []Warning
 	providerMetadata ProviderMetadata
 	toolResults      []ToolResultPart
+	aborted          bool
+	abortErr         error
+	abortReason      string
 	err              error
 }
 
-func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult *LanguageModelStreamResult, system string, promptMessages []Message, tools map[string]Tool, out chan<- StreamPart) streamStepAccumulation {
+func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult *LanguageModelStreamResult, system string, promptMessages []Message, tools map[string]Tool, toolsContext map[string]any, out chan<- StreamPart) streamStepAccumulation {
 	acc := streamStepAccumulation{finishReason: FinishReason{Unified: FinishUnknown}}
 	toolInput := map[string]string{}
 	blocked := map[string]bool{}
 	var textOutput string
 	var lastPartialOutput any
 	var haveLastPartialOutput bool
+	var publishedElements int
 
-	for part := range streamResult.Stream {
+	for {
+		var part StreamPart
+		var ok bool
+		select {
+		case <-ctx.Done():
+			acc.aborted = true
+			acc.abortErr = ctx.Err()
+			acc.abortReason = abortReason(ctx.Err())
+			return acc
+		case part, ok = <-streamResult.Stream:
+			if !ok {
+				return acc
+			}
+		}
 		if part.Type == "" {
 			part.Type = inferStreamPartType(part)
 		}
@@ -355,6 +413,18 @@ func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult
 				haveLastPartialOutput = true
 			}
 			emitStreamChunk(ctx, opts, out, part)
+			if partial.OK {
+				var elements []any
+				elements, publishedElements = elementsFromPartialOutput(opts.Output, partial.Value, publishedElements)
+				for _, element := range elements {
+					if !emitStreamChunk(ctx, opts, out, StreamPart{Type: "element", Element: element}) {
+						acc.aborted = true
+						acc.abortErr = ctx.Err()
+						acc.abortReason = abortReason(ctx.Err())
+						return acc
+					}
+				}
+			}
 		case "reasoning-delta":
 			acc.content = appendReasoningDelta(acc.content, part.ReasoningDelta, part.ProviderMetadata)
 			emitStreamChunk(ctx, opts, out, part)
@@ -421,7 +491,7 @@ func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult
 			if blocked[call.ToolCallID] {
 				continue
 			}
-			result := executeTool(ctx, opts.Timeout.Tool, call, tool, promptMessages, opts.OnToolExecutionStart, opts.OnToolExecutionEnd)
+			result := executeTool(ctx, opts.Timeout.Tool, call, tool, promptMessages, cloneAnyMap(toolsContext), opts.OnToolExecutionStart, opts.OnToolExecutionEnd)
 			acc.content = append(acc.content, result)
 			acc.toolResults = append(acc.toolResults, result)
 			emitStreamChunk(ctx, opts, out, StreamPart{Type: "tool-result", ToolCallID: result.ToolCallID, ToolName: result.ToolName, Content: result})
@@ -436,7 +506,6 @@ func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult
 			}
 		}
 	}
-	return acc
 }
 
 func appendTextDelta(parts []Part, delta string) []Part {
@@ -473,9 +542,18 @@ func sendStreamError(ctx context.Context, opts StreamTextOptions, out chan<- Str
 	emitStreamChunk(ctx, opts, out, StreamPart{Type: "error", Err: err})
 }
 
-func emitStreamChunk(ctx context.Context, opts StreamTextOptions, out chan<- StreamPart, part StreamPart) {
+func emitAbort(ctx context.Context, opts StreamTextOptions, out chan<- StreamPart, err error) {
+	emitStreamChunk(ctx, opts, out, StreamPart{Type: "abort", AbortReason: abortReason(err)})
+}
+
+func emitStreamChunk(ctx context.Context, opts StreamTextOptions, out chan<- StreamPart, part StreamPart) bool {
 	emitChunk(ctx, opts.Telemetry, opts.TelemetryOptions, opts.OnChunk, EventStreamTextChunk, OperationStreamText, part)
-	out <- part
+	select {
+	case <-ctx.Done():
+		return false
+	case out <- part:
+		return true
+	}
 }
 
 func inferStreamPartType(part StreamPart) string {
@@ -492,11 +570,24 @@ func inferStreamPartType(part StreamPart) string {
 		return "tool-call"
 	case part.Content != nil:
 		return part.Content.PartType()
+	case part.Element != nil:
+		return "element"
 	case part.FinishReason.Unified != "" || part.FinishReason.Raw != "" || !usageIsZero(part.Usage):
 		return "finish"
 	default:
 		return ""
 	}
+}
+
+func isAbortError(err error) bool {
+	return errors.Is(err, context.Canceled)
+}
+
+func abortReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func usageIsZero(usage Usage) bool {

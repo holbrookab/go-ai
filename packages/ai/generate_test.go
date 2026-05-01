@@ -103,6 +103,99 @@ func TestPrepareToolsHonorsNamedToolChoice(t *testing.T) {
 	}
 }
 
+func TestGenerateTextRejectsMissingNamedToolChoice(t *testing.T) {
+	_, err := GenerateText(context.Background(), GenerateTextOptions{
+		Model:      NewMockLanguageModel("lm"),
+		Prompt:     "hi",
+		ToolChoice: ToolChoiceFor("missing"),
+		Tools:      map[string]Tool{"search": {Description: "search"}},
+	})
+	if !IsNoSuchToolError(err) {
+		t.Fatalf("expected no such tool error, got %T %v", err, err)
+	}
+}
+
+func TestGenerateTextRejectsActiveToolThatIsNotDefined(t *testing.T) {
+	_, err := GenerateText(context.Background(), GenerateTextOptions{
+		Model:       NewMockLanguageModel("lm"),
+		Prompt:      "hi",
+		ActiveTools: []string{"missing"},
+		Tools:       map[string]Tool{"search": {Description: "search"}},
+	})
+	if !errors.Is(err, ErrNoSuchTool) {
+		t.Fatalf("expected no such tool error, got %T %v", err, err)
+	}
+}
+
+func TestGenerateTextValidatesToolCallInputSchema(t *testing.T) {
+	model := &sequenceModel{generate: func(opts LanguageModelCallOptions) (*LanguageModelGenerateResult, error) {
+		return &LanguageModelGenerateResult{
+			Content: []Part{ToolCallPart{
+				ToolCallID: "call-1",
+				ToolName:   "weather",
+				InputRaw:   `{"city":42}`,
+			}},
+			FinishReason: FinishReason{Unified: FinishToolCalls},
+		}, nil
+	}}
+	result, err := GenerateText(context.Background(), GenerateTextOptions{
+		Model:  model,
+		Prompt: "weather",
+		Tools: map[string]Tool{
+			"weather": {
+				InputSchema: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"city": map[string]any{"type": "string"}},
+				},
+				Execute: func(context.Context, ToolCall, ToolExecutionOptions) (any, error) {
+					t.Fatalf("invalid tool input should not execute")
+					return nil, nil
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("GenerateText failed: %v", err)
+	}
+	if len(result.ToolCalls) != 1 || !result.ToolCalls[0].Invalid {
+		t.Fatalf("expected invalid tool call, got %#v", result.ToolCalls)
+	}
+}
+
+func TestGenerateTextCarriesPrepareStepToolsContextToToolExecution(t *testing.T) {
+	model := &sequenceModel{generate: func(opts LanguageModelCallOptions) (*LanguageModelGenerateResult, error) {
+		return &LanguageModelGenerateResult{
+			Content: []Part{ToolCallPart{
+				ToolCallID: "call-1",
+				ToolName:   "echo",
+				InputRaw:   `{}`,
+			}},
+			FinishReason: FinishReason{Unified: FinishToolCalls},
+		}, nil
+	}}
+	_, err := GenerateText(context.Background(), GenerateTextOptions{
+		Model:    model,
+		Prompt:   "echo",
+		StopWhen: []StopCondition{StepCount(1)},
+		PrepareStep: func(opts PrepareStepOptions) (*PrepareStepResult, error) {
+			return &PrepareStepResult{ToolsContext: map[string]any{"tenant": "acme"}}, nil
+		},
+		Tools: map[string]Tool{
+			"echo": {
+				Execute: func(ctx context.Context, call ToolCall, opts ToolExecutionOptions) (any, error) {
+					if opts.Context.(map[string]any)["tenant"] != "acme" {
+						t.Fatalf("unexpected tool context: %#v", opts.Context)
+					}
+					return "ok", nil
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("GenerateText failed: %v", err)
+	}
+}
+
 func TestGenerateTextFiltersActiveTools(t *testing.T) {
 	model := NewMockLanguageModel("lm")
 	_, err := GenerateText(context.Background(), GenerateTextOptions{

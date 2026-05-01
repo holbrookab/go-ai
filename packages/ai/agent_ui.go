@@ -14,6 +14,7 @@ type AgentUIStreamOptions struct {
 
 func CreateAgentUIStream(ctx context.Context, opts AgentUIStreamOptions) <-chan UIMessageChunk {
 	return CreateUIMessageStream(CreateUIMessageStreamOptions{
+		Context: ctx,
 		Execute: func(writer UIMessageStreamWriter) error {
 			result, err := opts.Agent.Stream(ctx, opts.Call)
 			if err != nil {
@@ -36,6 +37,7 @@ type StreamTextUIMessageStreamOptions struct {
 func CreateStreamTextUIMessageStream(ctx context.Context, result *StreamTextResult, options ...StreamTextUIMessageStreamOptions) <-chan UIMessageChunk {
 	opts := firstStreamTextUIMessageStreamOptions(options)
 	return CreateUIMessageStream(CreateUIMessageStreamOptions{
+		Context:    ctx,
 		BufferSize: opts.BufferSize,
 		Execute: func(writer UIMessageStreamWriter) error {
 			return writeStreamTextResultAsUIMessageChunks(ctx, writer, result, opts)
@@ -136,6 +138,14 @@ func writeStreamTextResultAsUIMessageChunks(ctx context.Context, writer UIMessag
 				writer.Write(UIMessageChunk{Type: UIMessageChunkTypeReasoningEnd, ID: id})
 			}
 			writer.Write(FinishUIMessageChunk(part.FinishReason.Unified))
+		case "abort":
+			if textStarted {
+				writer.Write(TextEndUIMessageChunk(textID))
+			}
+			for id := range reasoningStarted {
+				writer.Write(UIMessageChunk{Type: UIMessageChunkTypeReasoningEnd, ID: id})
+			}
+			writer.Write(UIMessageChunk{Type: UIMessageChunkTypeAbort, Reason: part.AbortReason})
 		case "error":
 			writer.Write(ErrorUIMessageChunk(part.Err))
 		default:

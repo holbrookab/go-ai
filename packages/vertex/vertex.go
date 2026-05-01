@@ -403,6 +403,7 @@ func (m *LanguageModel) scanSSE(r io.Reader, out chan<- ai.StreamPart) {
 			out <- ai.StreamPart{Type: "error", Err: err}
 			continue
 		}
+		out <- ai.StreamPart{Type: "raw", Raw: json.RawMessage(append([]byte(nil), line...))}
 		if chunk.UsageMetadata.PromptTokenCount != 0 || chunk.UsageMetadata.CandidatesTokenCount != 0 {
 			usage = convertUsage(chunk.UsageMetadata)
 		}

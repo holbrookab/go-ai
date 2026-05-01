@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -79,6 +80,7 @@ func toLanguageModelPromptWithOptions(ctx context.Context, prompt standardizedPr
 	}
 
 	pendingToolCalls := map[string]struct{}{}
+	seenToolCalls := map[string]struct{}{}
 	var combined []Message
 	for _, message := range out {
 		normalized := normalizeMessage(message)
@@ -95,11 +97,20 @@ func toLanguageModelPromptWithOptions(ctx context.Context, prompt standardizedPr
 			for _, part := range message.Content {
 				if call, ok := part.(ToolCallPart); ok && !call.ProviderExecuted {
 					pendingToolCalls[call.ToolCallID] = struct{}{}
+					seenToolCalls[call.ToolCallID] = struct{}{}
 				}
 			}
 		case RoleTool:
 			for _, part := range message.Content {
 				if result, ok := part.(ToolResultPart); ok {
+					if !result.ProviderExecuted {
+						if _, seen := seenToolCalls[result.ToolCallID]; !seen {
+							return nil, &SDKError{Kind: ErrMissingToolResults, Message: fmt.Sprintf("tool result %q does not match a pending tool call", result.ToolCallID)}
+						}
+						if _, pending := pendingToolCalls[result.ToolCallID]; !pending {
+							return nil, &SDKError{Kind: ErrMissingToolResults, Message: fmt.Sprintf("tool result %q does not match a pending tool call", result.ToolCallID)}
+						}
+					}
 					delete(pendingToolCalls, result.ToolCallID)
 				}
 			}
@@ -233,7 +244,18 @@ func validateModelMessage(message Message) error {
 	case RoleAssistant:
 		for _, part := range message.Content {
 			switch typed := part.(type) {
-			case TextPart, ReasoningPart, ToolCallPart, ToolResultPart:
+			case TextPart, ReasoningPart:
+			case ToolCallPart:
+				if err := validateToolCallPart(typed); err != nil {
+					return err
+				}
+			case ToolResultPart:
+				if !typed.ProviderExecuted {
+					return &SDKError{Kind: ErrInvalidPrompt, Message: "assistant message tool-result parts must be provider-executed"}
+				}
+				if err := validateToolResultPart(typed); err != nil {
+					return err
+				}
 			case FilePart:
 				if err := validateFilePart(typed, false); err != nil {
 					return err
@@ -248,14 +270,41 @@ func validateModelMessage(message Message) error {
 		}
 	case RoleTool:
 		for _, part := range message.Content {
-			if _, ok := part.(ToolResultPart); !ok {
+			result, ok := part.(ToolResultPart)
+			if !ok {
 				return &SDKError{Kind: ErrInvalidPrompt, Message: fmt.Sprintf("tool message contains unsupported %q part", part.PartType())}
+			}
+			if err := validateToolResultPart(result); err != nil {
+				return err
 			}
 		}
 	case "":
 		return &SDKError{Kind: ErrInvalidPrompt, Message: "message role is required"}
 	default:
 		return NewInvalidMessageRoleError(message.Role)
+	}
+	return nil
+}
+
+func validateToolCallPart(part ToolCallPart) error {
+	if part.ToolCallID == "" {
+		return &SDKError{Kind: ErrInvalidPrompt, Message: "tool-call part requires toolCallID"}
+	}
+	if part.ToolName == "" {
+		return &SDKError{Kind: ErrInvalidPrompt, Message: "tool-call part requires toolName"}
+	}
+	if part.InputRaw != "" && !json.Valid([]byte(part.InputRaw)) {
+		return &SDKError{Kind: ErrInvalidPrompt, Message: "tool-call part input must be valid JSON"}
+	}
+	return nil
+}
+
+func validateToolResultPart(part ToolResultPart) error {
+	if part.ToolCallID == "" {
+		return &SDKError{Kind: ErrInvalidPrompt, Message: "tool-result part requires toolCallID"}
+	}
+	if part.ToolName == "" {
+		return &SDKError{Kind: ErrInvalidPrompt, Message: "tool-result part requires toolName"}
 	}
 	return nil
 }
