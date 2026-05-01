@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,9 +16,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsv4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/holbrookab/go-ai/internal/httputil"
 	"github.com/holbrookab/go-ai/packages/ai"
-	"github.com/holbrookab/go-ai/packages/bedrock/internal/sigv4"
 )
 
 type Credentials struct {
@@ -522,13 +525,14 @@ func (m *LanguageModel) signRequest(ctx context.Context, req *http.Request, body
 	if err != nil {
 		return err
 	}
-	return sigv4.Sign(req, body, sigv4.Credentials{
-		Region:          creds.Region,
+	bodyHash := sha256Hex(body)
+	req.Header.Set("X-Amz-Content-Sha256", bodyHash)
+	return awsv4.NewSigner().SignHTTP(ctx, aws.Credentials{
 		AccessKeyID:     creds.AccessKeyID,
 		SecretAccessKey: creds.SecretAccessKey,
 		SessionToken:    creds.SessionToken,
-		Service:         "bedrock",
-	}, time.Now())
+		Source:          "go-ai-bedrock",
+	}, req, bodyHash, "bedrock", creds.Region, time.Now())
 }
 
 func (m *LanguageModel) credentials(ctx context.Context) (Credentials, error) {
@@ -575,6 +579,11 @@ func bedrockOptions(options ai.ProviderOptions) map[string]any {
 		return v
 	}
 	return nil
+}
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func mediaSubtype(mediaType string) string {
