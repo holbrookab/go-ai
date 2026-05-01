@@ -177,6 +177,44 @@ func TestDoGenerateSkipsEmptyTextBeforeJSONToolResponse(t *testing.T) {
 	}
 }
 
+func TestDoGenerateMapsMessageTextWhenContentIsEmpty(t *testing.T) {
+	client := &captureClient{response: `{
+		"output":{"message":{"content":[{"text":"aloha"}]}},
+		"stopReason":"end_turn"
+	}`}
+	provider := New(Settings{
+		Region: "us-east-1",
+		APIKey: "token",
+		Client: client,
+	})
+	_, err := provider.LanguageModel("amazon.nova-lite-v1:0").DoGenerate(context.Background(), ai.LanguageModelCallOptions{
+		Prompt: []ai.Message{
+			{Role: ai.RoleUser, Text: "hello from text field"},
+			{Role: ai.RoleAssistant, Text: "assistant from text field"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("DoGenerate failed: %v", err)
+	}
+	var body struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(client.body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if got := body.Messages[0].Content[0].Text; got != "hello from text field" {
+		t.Fatalf("expected user text fallback, got %q", got)
+	}
+	if got := body.Messages[1].Content[0].Text; got != "assistant from text field" {
+		t.Fatalf("expected assistant text fallback, got %q", got)
+	}
+}
+
 func TestDoStreamDecodesBedrockEventStreamFrames(t *testing.T) {
 	var stream bytes.Buffer
 	encoder := eventstream.NewEncoder()

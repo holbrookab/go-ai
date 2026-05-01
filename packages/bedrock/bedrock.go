@@ -223,18 +223,25 @@ func convertMessages(messages []ai.Message) ([]map[string]any, []map[string]any)
 		case ai.RoleSystem:
 			system = append(system, map[string]any{"text": message.Text})
 		case ai.RoleUser, ai.RoleTool:
-			content := bedrockUserContent(message.Content)
+			content := bedrockUserContent(messageContent(message))
 			if len(content) > 0 {
 				out = append(out, map[string]any{"role": "user", "content": content})
 			}
 		case ai.RoleAssistant:
-			content := bedrockAssistantContent(message.Content)
+			content := bedrockAssistantContent(messageContent(message))
 			if len(content) > 0 {
 				out = append(out, map[string]any{"role": "assistant", "content": content})
 			}
 		}
 	}
 	return system, out
+}
+
+func messageContent(message ai.Message) []ai.Part {
+	if len(message.Content) > 0 || message.Text == "" {
+		return message.Content
+	}
+	return []ai.Part{ai.TextPart{Text: message.Text}}
 }
 
 func bedrockUserContent(parts []ai.Part) []map[string]any {
