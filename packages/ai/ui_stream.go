@@ -111,6 +111,31 @@ func ErrorUIMessageChunk(err error) UIMessageChunk {
 	return UIMessageChunk{Type: UIMessageChunkTypeError, ErrorText: err.Error(), Err: err}
 }
 
+func DataUIMessageChunk(name string, id string, data any) UIMessageChunk {
+	if name != "" && !strings.HasPrefix(name, "data-") {
+		name = "data-" + name
+	}
+	return UIMessageChunk{Type: name, ID: id, Data: data}
+}
+
+func ToolApprovalRequestUIMessageChunk(approvalID string, toolCallID string, isAutomatic bool) UIMessageChunk {
+	return UIMessageChunk{
+		Type:        UIMessageChunkTypeToolApprovalRequest,
+		ApprovalID:  approvalID,
+		ToolCallID:  toolCallID,
+		IsAutomatic: &isAutomatic,
+	}
+}
+
+func ToolApprovalResponseUIMessageChunk(approvalID string, approved bool, reason string) UIMessageChunk {
+	return UIMessageChunk{
+		Type:       UIMessageChunkTypeToolApprovalResponse,
+		ApprovalID: approvalID,
+		Approved:   &approved,
+		Reason:     reason,
+	}
+}
+
 func IsDataUIMessageChunk(chunk UIMessageChunk) bool {
 	return strings.HasPrefix(chunk.Type, "data-")
 }

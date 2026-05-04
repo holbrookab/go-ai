@@ -93,6 +93,55 @@ func TestGenerateTextRunsToolLoop(t *testing.T) {
 	}
 }
 
+func TestGenerateTextHonorsToolApprovalConfiguration(t *testing.T) {
+	executed := false
+	model := &sequenceModel{generate: func(LanguageModelCallOptions) (*LanguageModelGenerateResult, error) {
+		return &LanguageModelGenerateResult{
+			Content: []Part{
+				ToolCallPart{ToolCallID: "call-1", ToolName: "writeRecord", InputRaw: `{"id":"1"}`},
+			},
+			FinishReason: FinishReason{Unified: FinishToolCalls, Raw: "tool_use"},
+			Usage:        usage(1, 1),
+		}, nil
+	}}
+
+	result, err := GenerateText(context.Background(), GenerateTextOptions{
+		Model:  model,
+		Prompt: "write?",
+		Tools: map[string]Tool{
+			"writeRecord": {
+				Description: "Write a record",
+				InputSchema: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"id": map[string]any{"type": "string"}},
+				},
+				Execute: func(context.Context, ToolCall, ToolExecutionOptions) (any, error) {
+					executed = true
+					return "ok", nil
+				},
+			},
+		},
+		ToolApproval: &ToolApprovalConfiguration{
+			Tools: map[string]ToolApprovalRule{
+				"writeRecord": {Type: ApprovalDecisionDenied, Reason: "needs human review"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("GenerateText failed: %v", err)
+	}
+	if executed {
+		t.Fatalf("tool should not execute after denied approval")
+	}
+	if len(result.ToolResults) != 1 {
+		t.Fatalf("expected denied tool result, got %#v", result.ToolResults)
+	}
+	output := result.ToolResults[0].Output
+	if output.Type != "execution-denied" || output.Reason != "needs human review" {
+		t.Fatalf("unexpected denied output: %#v", output)
+	}
+}
+
 func TestPrepareToolsHonorsNamedToolChoice(t *testing.T) {
 	tools := prepareModelTools(map[string]Tool{
 		"a": {Description: "A"},

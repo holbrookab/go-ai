@@ -170,6 +170,21 @@ func TestValidateUIMessageChunk(t *testing.T) {
 	if err := ValidateUIMessageChunk(TextStartUIMessageChunk("text-1")); err != nil {
 		t.Fatalf("expected valid chunk, got %v", err)
 	}
+	dataChunk := DataUIMessageChunk("plan", "plan-1", map[string]any{"status": "pending"})
+	if dataChunk.Type != "data-plan" || dataChunk.ID != "plan-1" {
+		t.Fatalf("unexpected data chunk: %#v", dataChunk)
+	}
+	if err := ValidateUIMessageChunk(dataChunk); err != nil {
+		t.Fatalf("expected data chunk to validate, got %v", err)
+	}
+	requestChunk := ToolApprovalRequestUIMessageChunk("approval-1", "call-1", true)
+	if err := ValidateUIMessageChunk(requestChunk); err != nil {
+		t.Fatalf("expected tool approval request chunk to validate, got %v", err)
+	}
+	responseChunk := ToolApprovalResponseUIMessageChunk("approval-1", true, "approved by policy")
+	if err := ValidateUIMessageChunk(responseChunk); err != nil {
+		t.Fatalf("expected tool approval response chunk to validate, got %v", err)
+	}
 	if err := ValidateUIMessageChunk(UIMessageChunk{Type: UIMessageChunkTypeToolApprovalResponse, ApprovalID: "approval-1"}); err == nil {
 		t.Fatalf("expected missing approved error")
 	}

@@ -183,12 +183,12 @@ func GenerateText(ctx context.Context, opts GenerateTextOptions) (result *Genera
 				blocked[call.ToolCallID] = true
 				continue
 			}
-			if tool.NeedsApproval != nil {
-				decision, err := tool.NeedsApproval(stepCtx, call)
+			if opts.ToolApproval != nil || tool.RequiresApproval || tool.NeedsApproval != nil {
+				decision, err := resolveToolApproval(stepCtx, stepTools, call, opts.ToolApproval, promptMessages, cloneAnyMap(toolsContext))
 				if err != nil {
 					return nil, err
 				}
-				if decision.Type == "denied" || decision.Type == "user-approval" {
+				if ApprovalBlocksToolExecution(decision) {
 					blocked[call.ToolCallID] = true
 					output := ToolResultOutput{Type: "execution-denied", Reason: decision.Reason}
 					clientToolResults = append(clientToolResults, ToolResultPart{

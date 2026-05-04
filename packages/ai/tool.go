@@ -22,6 +22,28 @@ type ToolExecutionOptions struct {
 	Context    any
 }
 
+type ToolApprovalOptions struct {
+	ToolCall ToolCall
+	Tools    map[string]Tool
+	Messages []Message
+	Context  any
+}
+
+type ToolApprovalFunction func(context.Context, ToolApprovalOptions) (ApprovalDecision, error)
+
+type SingleToolApprovalFunction func(context.Context, ToolCall, ToolApprovalOptions) (ApprovalDecision, error)
+
+type ToolApprovalRule struct {
+	Type   string
+	Reason string
+	Decide SingleToolApprovalFunction
+}
+
+type ToolApprovalConfiguration struct {
+	Decide ToolApprovalFunction
+	Tools  map[string]ToolApprovalRule
+}
+
 type Tool struct {
 	Name             string
 	Title            string
@@ -39,24 +61,101 @@ type Tool struct {
 	ValidateInput    func(any) error
 	ValidateOutput   func(any) error
 	ToModelOutput    func(toolCallID string, input any, output any) (ToolResultOutput, error)
+	RequiresApproval bool
 	NeedsApproval    func(context.Context, ToolCall) (ApprovalDecision, error)
 }
+
+const (
+	ApprovalDecisionApproved      = "approved"
+	ApprovalDecisionDenied        = "denied"
+	ApprovalDecisionUserApproval  = "user-approval"
+	ApprovalDecisionNotApplicable = "not-applicable"
+)
 
 type ApprovalDecision struct {
 	Type   string
 	Reason string
 }
 
-func Approved(reason string) ApprovalDecision {
-	return ApprovalDecision{Type: "approved", Reason: reason}
+func Approved(reason ...string) ApprovalDecision {
+	decision := ApprovalDecision{Type: ApprovalDecisionApproved}
+	if len(reason) > 0 {
+		decision.Reason = reason[0]
+	}
+	return decision
 }
 
-func Denied(reason string) ApprovalDecision {
-	return ApprovalDecision{Type: "denied", Reason: reason}
+func Denied(reason ...string) ApprovalDecision {
+	decision := ApprovalDecision{Type: ApprovalDecisionDenied}
+	if len(reason) > 0 {
+		decision.Reason = reason[0]
+	}
+	return decision
 }
 
 func UserApproval() ApprovalDecision {
-	return ApprovalDecision{Type: "user-approval"}
+	return ApprovalDecision{Type: ApprovalDecisionUserApproval}
+}
+
+func RequireUserApproval() func(context.Context, ToolCall) (ApprovalDecision, error) {
+	return func(context.Context, ToolCall) (ApprovalDecision, error) {
+		return UserApproval(), nil
+	}
+}
+
+func resolveToolApproval(ctx context.Context, tools map[string]Tool, call ToolCall, approval *ToolApprovalConfiguration, messages []Message, toolsContext map[string]any) (ApprovalDecision, error) {
+	options := ToolApprovalOptions{
+		ToolCall: call,
+		Tools:    tools,
+		Messages: messages,
+		Context:  toolsContext,
+	}
+	if approval != nil {
+		if approval.Decide != nil {
+			decision, err := approval.Decide(ctx, options)
+			if err != nil {
+				return ApprovalDecision{}, err
+			}
+			return normalizeApprovalDecision(decision), nil
+		}
+		if rule, ok := approval.Tools[call.ToolName]; ok {
+			if rule.Decide != nil {
+				decision, err := rule.Decide(ctx, call, options)
+				if err != nil {
+					return ApprovalDecision{}, err
+				}
+				return normalizeApprovalDecision(decision), nil
+			}
+			return normalizeApprovalDecision(ApprovalDecision{Type: rule.Type, Reason: rule.Reason}), nil
+		}
+	}
+
+	tool, ok := tools[call.ToolName]
+	if !ok {
+		return ApprovalDecision{Type: ApprovalDecisionNotApplicable}, nil
+	}
+	if tool.NeedsApproval != nil {
+		decision, err := tool.NeedsApproval(ctx, call)
+		if err != nil {
+			return ApprovalDecision{}, err
+		}
+		return normalizeApprovalDecision(decision), nil
+	}
+	if tool.RequiresApproval {
+		return UserApproval(), nil
+	}
+	return ApprovalDecision{Type: ApprovalDecisionNotApplicable}, nil
+}
+
+func normalizeApprovalDecision(decision ApprovalDecision) ApprovalDecision {
+	if decision.Type == "" {
+		decision.Type = ApprovalDecisionNotApplicable
+	}
+	return decision
+}
+
+func ApprovalBlocksToolExecution(decision ApprovalDecision) bool {
+	return decision.Type == ApprovalDecisionDenied || decision.Type == ApprovalDecisionUserApproval
 }
 
 func (t Tool) toModelTool(name string) ModelTool {

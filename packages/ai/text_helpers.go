@@ -175,19 +175,11 @@ func PruneMessages(opts PruneMessagesOptions) []Message {
 }
 
 func ResolveToolApproval(ctx context.Context, tools map[string]Tool, call ToolCall) (ApprovalDecision, error) {
-	tool, ok := tools[call.ToolName]
-	if !ok || tool.NeedsApproval == nil {
-		return ApprovalDecision{Type: "not-applicable"}, nil
-	}
+	return ResolveToolApprovalWithConfiguration(ctx, tools, call, nil, nil, nil)
+}
 
-	decision, err := tool.NeedsApproval(ctx, call)
-	if err != nil {
-		return ApprovalDecision{}, err
-	}
-	if decision.Type == "" {
-		return ApprovalDecision{Type: "not-applicable", Reason: decision.Reason}, nil
-	}
-	return decision, nil
+func ResolveToolApprovalWithConfiguration(ctx context.Context, tools map[string]Tool, call ToolCall, approval *ToolApprovalConfiguration, messages []Message, toolsContext map[string]any) (ApprovalDecision, error) {
+	return resolveToolApproval(ctx, tools, call, approval, messages, toolsContext)
 }
 
 func (r PruneToolCallsRule) keepLastCount() *int {

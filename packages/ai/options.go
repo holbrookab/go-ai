@@ -14,6 +14,7 @@ type GenerateTextOptions struct {
 	Tools                 map[string]Tool
 	ActiveTools           []string
 	ToolChoice            ToolChoice
+	ToolApproval          *ToolApprovalConfiguration
 	StopWhen              []StopCondition
 	MaxRetries            *int
 	Timeout               TimeoutConfig

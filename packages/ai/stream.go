@@ -469,13 +469,13 @@ func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult
 				blocked[call.ToolCallID] = true
 				continue
 			}
-			if tool.NeedsApproval != nil {
-				decision, err := tool.NeedsApproval(ctx, call)
+			if opts.ToolApproval != nil || tool.RequiresApproval || tool.NeedsApproval != nil {
+				decision, err := resolveToolApproval(ctx, tools, call, opts.ToolApproval, promptMessages, cloneAnyMap(toolsContext))
 				if err != nil {
 					acc.err = err
 					return acc
 				}
-				if decision.Type == "denied" || decision.Type == "user-approval" {
+				if ApprovalBlocksToolExecution(decision) {
 					blocked[call.ToolCallID] = true
 					result := ToolResultPart{
 						ToolCallID: call.ToolCallID,

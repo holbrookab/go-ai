@@ -20,6 +20,7 @@ type AgentCallOptions struct {
 	Tools                 map[string]Tool
 	ActiveTools           []string
 	ToolChoice            ToolChoice
+	ToolApproval          *ToolApprovalConfiguration
 	StopWhen              []StopCondition
 	MaxRetries            *int
 	Timeout               TimeoutConfig
@@ -61,6 +62,7 @@ type ToolLoopAgentSettings struct {
 	Tools                map[string]Tool
 	ActiveTools          []string
 	ToolChoice           ToolChoice
+	ToolApproval         *ToolApprovalConfiguration
 	StopWhen             []StopCondition
 	MaxRetries           *int
 	Timeout              TimeoutConfig
@@ -104,6 +106,7 @@ type AgentPreparedCall struct {
 	Tools                 map[string]Tool
 	ActiveTools           []string
 	ToolChoice            *ToolChoice
+	ToolApproval          *ToolApprovalConfiguration
 	StopWhen              []StopCondition
 	MaxRetries            *int
 	Timeout               *TimeoutConfig
@@ -166,6 +169,7 @@ func (a *ToolLoopAgent) Generate(ctx context.Context, opts AgentCallOptions) (*G
 		Tools:                 call.Tools,
 		ActiveTools:           opts.ActiveTools,
 		ToolChoice:            call.ToolChoice,
+		ToolApproval:          call.ToolApproval,
 		StopWhen:              call.StopWhen,
 		MaxRetries:            call.MaxRetries,
 		Timeout:               call.Timeout,
@@ -209,6 +213,7 @@ func (a *ToolLoopAgent) Stream(ctx context.Context, opts AgentStreamOptions) (*S
 			Tools:                 call.Tools,
 			ActiveTools:           opts.ActiveTools,
 			ToolChoice:            call.ToolChoice,
+			ToolApproval:          call.ToolApproval,
 			StopWhen:              call.StopWhen,
 			MaxRetries:            call.MaxRetries,
 			Timeout:               call.Timeout,
@@ -249,6 +254,7 @@ type preparedAgentCall struct {
 	Model                 LanguageModel
 	Tools                 map[string]Tool
 	ToolChoice            ToolChoice
+	ToolApproval          *ToolApprovalConfiguration
 	StopWhen              []StopCondition
 	MaxRetries            *int
 	Timeout               TimeoutConfig
@@ -284,6 +290,7 @@ func (a *ToolLoopAgent) prepareCall(opts AgentCallOptions) (preparedAgentCall, e
 		Model:                 firstLanguageModel(optsModel(opts), settings.Model),
 		Tools:                 firstTools(opts.Tools, settings.Tools),
 		ToolChoice:            firstToolChoice(opts.ToolChoice, settings.ToolChoice),
+		ToolApproval:          firstToolApproval(opts.ToolApproval, settings.ToolApproval),
 		StopWhen:              firstStopConditions(opts.StopWhen, settings.StopWhen, []StopCondition{StepCount(20)}),
 		MaxRetries:            firstIntPtr(opts.MaxRetries, settings.MaxRetries),
 		Timeout:               firstTimeout(opts.Timeout, settings.Timeout),
@@ -353,6 +360,9 @@ func applyPreparedAgentCall(call *preparedAgentCall, prepared *AgentPreparedCall
 	}
 	if prepared.ToolChoice != nil {
 		call.ToolChoice = *prepared.ToolChoice
+	}
+	if prepared.ToolApproval != nil {
+		call.ToolApproval = prepared.ToolApproval
 	}
 	if prepared.StopWhen != nil {
 		call.StopWhen = prepared.StopWhen
@@ -437,6 +447,15 @@ func firstToolChoice(values ...ToolChoice) ToolChoice {
 		}
 	}
 	return ToolChoice{}
+}
+
+func firstToolApproval(values ...*ToolApprovalConfiguration) *ToolApprovalConfiguration {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
 }
 
 func firstStopConditions(values ...[]StopCondition) []StopCondition {

@@ -158,6 +158,63 @@ func TestResolveToolApproval(t *testing.T) {
 	}
 }
 
+func TestResolveToolApprovalWithConfiguration(t *testing.T) {
+	call := ToolCall{ToolCallID: "call-1", ToolName: "weather", Input: map[string]any{"city": "NYC"}}
+	tools := map[string]Tool{
+		"weather": {
+			RequiresApproval: true,
+			NeedsApproval: func(context.Context, ToolCall) (ApprovalDecision, error) {
+				t.Fatal("tool-defined approval should not run when call-level approval is configured")
+				return ApprovalDecision{}, nil
+			},
+		},
+	}
+	messages := []Message{UserMessage("weather?")}
+	config := &ToolApprovalConfiguration{
+		Decide: func(_ context.Context, opts ToolApprovalOptions) (ApprovalDecision, error) {
+			if opts.ToolCall.ToolCallID != call.ToolCallID {
+				t.Fatalf("unexpected tool call in approval options: %#v", opts.ToolCall)
+			}
+			if len(opts.Messages) != len(messages) {
+				t.Fatalf("expected messages in approval options, got %#v", opts.Messages)
+			}
+			return Approved("read-only"), nil
+		},
+	}
+
+	decision, err := ResolveToolApprovalWithConfiguration(context.Background(), tools, call, config, messages, map[string]any{"scope": "test"})
+	if err != nil {
+		t.Fatalf("ResolveToolApprovalWithConfiguration failed: %v", err)
+	}
+	if decision.Type != ApprovalDecisionApproved || decision.Reason != "read-only" {
+		t.Fatalf("unexpected approval decision: %#v", decision)
+	}
+}
+
+func TestResolveToolApprovalPerToolPrecedesToolDefinedApproval(t *testing.T) {
+	call := ToolCall{ToolCallID: "call-1", ToolName: "weather"}
+	tools := map[string]Tool{
+		"weather": {
+			NeedsApproval: func(context.Context, ToolCall) (ApprovalDecision, error) {
+				return UserApproval(), nil
+			},
+		},
+	}
+	config := &ToolApprovalConfiguration{
+		Tools: map[string]ToolApprovalRule{
+			"weather": {Type: ApprovalDecisionDenied, Reason: "writes disabled"},
+		},
+	}
+
+	decision, err := ResolveToolApprovalWithConfiguration(context.Background(), tools, call, config, nil, nil)
+	if err != nil {
+		t.Fatalf("ResolveToolApprovalWithConfiguration failed: %v", err)
+	}
+	if decision.Type != ApprovalDecisionDenied || decision.Reason != "writes disabled" {
+		t.Fatalf("unexpected approval decision: %#v", decision)
+	}
+}
+
 func containsToolPart(parts []Part, id string) bool {
 	for _, part := range parts {
 		if toolPartID(part) == id {
