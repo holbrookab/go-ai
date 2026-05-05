@@ -63,6 +63,9 @@ func writeStreamTextResultAsUIMessageChunks(ctx context.Context, writer UIMessag
 	writer.Write(StartUIMessageChunk(messageID))
 	textStarted := false
 	reasoningStarted := map[string]bool{}
+	write := func(chunk UIMessageChunk, part StreamPart) {
+		writer.Write(withUIChunkStepMetadata(chunk, part))
+	}
 	for {
 		var part StreamPart
 		var ok bool
@@ -75,50 +78,52 @@ func writeStreamTextResultAsUIMessageChunks(ctx context.Context, writer UIMessag
 			}
 		}
 		switch part.Type {
+		case "start-step":
+			write(UIMessageChunk{Type: UIMessageChunkTypeStartStep}, part)
 		case "text-delta":
 			if !textStarted {
-				writer.Write(UIMessageChunk{Type: UIMessageChunkTypeTextStart, ID: textID, ProviderMetadata: part.ProviderMetadata})
+				write(UIMessageChunk{Type: UIMessageChunkTypeTextStart, ID: textID, ProviderMetadata: part.ProviderMetadata}, part)
 				textStarted = true
 			}
-			writer.Write(UIMessageChunk{Type: UIMessageChunkTypeTextDelta, ID: textID, Delta: part.TextDelta, ProviderMetadata: part.ProviderMetadata})
+			write(UIMessageChunk{Type: UIMessageChunkTypeTextDelta, ID: textID, Delta: part.TextDelta, ProviderMetadata: part.ProviderMetadata}, part)
 		case "reasoning-delta":
 			id := part.ID
 			if id == "" {
 				id = "reasoning-1"
 			}
 			if !reasoningStarted[id] {
-				writer.Write(UIMessageChunk{Type: UIMessageChunkTypeReasoningStart, ID: id, ProviderMetadata: part.ProviderMetadata})
+				write(UIMessageChunk{Type: UIMessageChunkTypeReasoningStart, ID: id, ProviderMetadata: part.ProviderMetadata}, part)
 				reasoningStarted[id] = true
 			}
-			writer.Write(UIMessageChunk{Type: UIMessageChunkTypeReasoningDelta, ID: id, Delta: part.ReasoningDelta, ProviderMetadata: part.ProviderMetadata})
+			write(UIMessageChunk{Type: UIMessageChunkTypeReasoningDelta, ID: id, Delta: part.ReasoningDelta, ProviderMetadata: part.ProviderMetadata}, part)
 		case "tool-input-delta":
-			writer.Write(UIMessageChunk{Type: UIMessageChunkTypeToolInputDelta, ToolCallID: part.ToolCallID, InputTextDelta: part.ToolInputDelta})
+			write(UIMessageChunk{Type: UIMessageChunkTypeToolInputDelta, ToolCallID: part.ToolCallID, InputTextDelta: part.ToolInputDelta}, part)
 		case "tool-call":
 			input, _ := parseUIStreamToolInput(part.ToolInput)
-			writer.Write(UIMessageChunk{
+			write(UIMessageChunk{
 				Type:             UIMessageChunkTypeToolInputAvailable,
 				ToolCallID:       part.ToolCallID,
 				ToolName:         part.ToolName,
 				Input:            input,
 				ProviderMetadata: part.ProviderMetadata,
-			})
+			}, part)
 		case "tool-result":
 			output := any(part.Content)
 			if resultPart, ok := part.Content.(ToolResultPart); ok {
 				output = resultPart.Output.Value
 				if resultPart.Output.Type == "execution-denied" {
-					writer.Write(UIMessageChunk{Type: UIMessageChunkTypeToolOutputDenied, ToolCallID: part.ToolCallID})
+					write(UIMessageChunk{Type: UIMessageChunkTypeToolOutputDenied, ToolCallID: part.ToolCallID}, part)
 					continue
 				}
 				if resultPart.Output.Type == "error-text" || resultPart.Output.Type == "error-json" {
-					writer.Write(UIMessageChunk{Type: UIMessageChunkTypeToolOutputError, ToolCallID: part.ToolCallID, ErrorText: stringifyToolOutput(resultPart.Output.Value)})
+					write(UIMessageChunk{Type: UIMessageChunkTypeToolOutputError, ToolCallID: part.ToolCallID, ErrorText: stringifyToolOutput(resultPart.Output.Value)}, part)
 					continue
 				}
 			}
-			writer.Write(UIMessageChunk{Type: UIMessageChunkTypeToolOutputAvailable, ToolCallID: part.ToolCallID, Output: output, ProviderMetadata: part.ProviderMetadata})
+			write(UIMessageChunk{Type: UIMessageChunkTypeToolOutputAvailable, ToolCallID: part.ToolCallID, Output: output, ProviderMetadata: part.ProviderMetadata}, part)
 		case "file":
 			if file, ok := part.Content.(FilePart); ok {
-				writer.Write(UIMessageChunk{Type: UIMessageChunkTypeFile, URL: file.Data.URL, MediaType: file.MediaType, Filename: file.Filename, ProviderMetadata: mergeMetadata(ProviderMetadata(file.ProviderOptions), file.ProviderMetadata)})
+				write(UIMessageChunk{Type: UIMessageChunkTypeFile, URL: file.Data.URL, MediaType: file.MediaType, Filename: file.Filename, ProviderMetadata: mergeMetadata(ProviderMetadata(file.ProviderOptions), file.ProviderMetadata)}, part)
 			}
 		case "source":
 			chunk := UIMessageChunk{Type: UIMessageChunkTypeSourceURL, SourceID: part.ID, ProviderMetadata: part.ProviderMetadata}
@@ -127,9 +132,9 @@ func writeStreamTextResultAsUIMessageChunks(ctx context.Context, writer UIMessag
 				chunk.URL = source.URL
 				chunk.Title = source.Title
 			}
-			writer.Write(chunk)
+			write(chunk, part)
 		case "finish-step":
-			writer.Write(UIMessageChunk{Type: UIMessageChunkTypeFinishStep})
+			write(UIMessageChunk{Type: UIMessageChunkTypeFinishStep, FinishReason: part.FinishReason.Unified, ProviderMetadata: part.ProviderMetadata}, part)
 		case "finish":
 			if textStarted {
 				writer.Write(TextEndUIMessageChunk(textID))
@@ -187,4 +192,16 @@ func parseUIStreamToolInput(input string) (any, error) {
 		return input, err
 	}
 	return out, nil
+}
+
+func withUIChunkStepMetadata(chunk UIMessageChunk, part StreamPart) UIMessageChunk {
+	if part.StepID != "" {
+		chunk.StepID = part.StepID
+	}
+	stepNumber := part.StepNumber
+	chunk.StepNumber = &stepNumber
+	if part.StepType != "" {
+		chunk.StepType = part.StepType
+	}
+	return chunk
 }

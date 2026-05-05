@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/holbrookab/go-ai/internal/retry"
@@ -59,6 +60,8 @@ func GenerateText(ctx context.Context, opts GenerateTextOptions) (result *Genera
 		}
 
 		stepNumber := len(steps)
+		stepID := defaultStepID(stepNumber)
+		stepType := defaultStepType(stepNumber)
 		model := opts.Model
 		system := opts.System
 		stepMessages := append([]Message{}, initialPrompt.Messages...)
@@ -169,6 +172,7 @@ func GenerateText(ctx context.Context, opts GenerateTextOptions) (result *Genera
 		clientToolCalls = clientToolCalls[:0]
 		clientToolResults = clientToolResults[:0]
 		blocked := map[string]bool{}
+		precomputedToolResults := map[string]ToolResultPart{}
 
 		for _, call := range toolCalls {
 			if call.ProviderExecuted {
@@ -191,23 +195,17 @@ func GenerateText(ctx context.Context, opts GenerateTextOptions) (result *Genera
 				if ApprovalBlocksToolExecution(decision) {
 					blocked[call.ToolCallID] = true
 					output := ToolResultOutput{Type: "execution-denied", Reason: decision.Reason}
-					clientToolResults = append(clientToolResults, ToolResultPart{
+					precomputedToolResults[call.ToolCallID] = ToolResultPart{
 						ToolCallID: call.ToolCallID,
 						ToolName:   call.ToolName,
 						Input:      call.Input,
 						Output:     output,
-					})
+					}
 				}
 			}
 		}
 
-		for _, call := range clientToolCalls {
-			if blocked[call.ToolCallID] {
-				continue
-			}
-			result := executeTool(stepCtx, opts.Timeout.Tool, call, stepTools[call.ToolName], promptMessages, cloneAnyMap(toolsContext), opts.OnToolExecutionStart, opts.OnToolExecutionEnd)
-			clientToolResults = append(clientToolResults, result)
-		}
+		clientToolResults = executeToolCalls(stepCtx, clientToolCalls, stepTools, promptMessages, cloneAnyMap(toolsContext), opts.Timeout.Tool, opts.ToolExecution, blocked, precomputedToolResults, opts.OnToolExecutionStart, opts.OnToolExecutionEnd)
 		for _, part := range parsedContent {
 			if result, ok := part.(ToolResultPart); ok {
 				delete(pendingProviderResults, result.ToolCallID)
@@ -234,7 +232,9 @@ func GenerateText(ctx context.Context, opts GenerateTextOptions) (result *Genera
 
 		last = &StepResult{
 			CallID:           callID,
+			StepID:           stepID,
 			StepNumber:       stepNumber,
+			StepType:         stepType,
 			Provider:         model.Provider(),
 			ModelID:          model.ModelID(),
 			Content:          stepContent,
@@ -504,6 +504,72 @@ func executeTool(ctx context.Context, timeout time.Duration, call ToolCall, tool
 		onEnd(ToolExecutionEndEvent{ToolCall: call, Result: result, Err: err})
 	}
 	return result
+}
+
+func executeToolCalls(ctx context.Context, calls []ToolCall, tools map[string]Tool, messages []Message, toolsContext map[string]any, timeout time.Duration, mode ToolExecutionMode, blocked map[string]bool, precomputed map[string]ToolResultPart, onStart func(ToolExecutionStartEvent), onEnd func(ToolExecutionEndEvent)) []ToolResultPart {
+	if len(calls) == 0 {
+		return nil
+	}
+	if mode == ToolExecutionSequential {
+		results := make([]ToolResultPart, 0, len(calls))
+		for _, call := range calls {
+			if result, ok := precomputed[call.ToolCallID]; ok {
+				results = append(results, result)
+				continue
+			}
+			if blocked[call.ToolCallID] {
+				continue
+			}
+			tool, ok := tools[call.ToolName]
+			if !ok || tool.Execute == nil || call.Invalid {
+				continue
+			}
+			results = append(results, executeTool(ctx, timeout, call, tool, messages, cloneAnyMap(toolsContext), onStart, onEnd))
+		}
+		return results
+	}
+
+	results := make([]ToolResultPart, len(calls))
+	var wg sync.WaitGroup
+	for index, call := range calls {
+		if result, ok := precomputed[call.ToolCallID]; ok {
+			results[index] = result
+			continue
+		}
+		if blocked[call.ToolCallID] {
+			continue
+		}
+		tool, ok := tools[call.ToolName]
+		if !ok || tool.Execute == nil || call.Invalid {
+			continue
+		}
+		wg.Add(1)
+		go func(index int, call ToolCall, tool Tool) {
+			defer wg.Done()
+			results[index] = executeTool(ctx, timeout, call, tool, messages, cloneAnyMap(toolsContext), onStart, onEnd)
+		}(index, call, tool)
+	}
+	wg.Wait()
+
+	out := make([]ToolResultPart, 0, len(results))
+	for _, result := range results {
+		if result.ToolCallID == "" {
+			continue
+		}
+		out = append(out, result)
+	}
+	return out
+}
+
+func defaultStepID(stepNumber int) string {
+	return fmt.Sprintf("step-%d", stepNumber)
+}
+
+func defaultStepType(stepNumber int) string {
+	if stepNumber == 0 {
+		return "initial"
+	}
+	return "tool-result"
 }
 
 func mergeToolsContext(base map[string]any, overrides map[string]any) map[string]any {

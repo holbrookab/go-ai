@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestGenerateTextRequiresPromptOrMessages(t *testing.T) {
@@ -90,6 +91,65 @@ func TestGenerateTextRunsToolLoop(t *testing.T) {
 	}
 	if result.Usage.TotalTokens == nil || *result.Usage.TotalTokens != 7 {
 		t.Fatalf("expected total usage 7, got %#v", result.Usage.TotalTokens)
+	}
+}
+
+func TestGenerateTextRunsSameStepToolsInParallelByDefault(t *testing.T) {
+	aStarted := make(chan struct{})
+	bStarted := make(chan struct{})
+	model := &sequenceModel{generate: func(LanguageModelCallOptions) (*LanguageModelGenerateResult, error) {
+		return &LanguageModelGenerateResult{
+			Content: []Part{
+				ToolCallPart{ToolCallID: "call-a", ToolName: "a", InputRaw: `{}`},
+				ToolCallPart{ToolCallID: "call-b", ToolName: "b", InputRaw: `{}`},
+			},
+			FinishReason: FinishReason{Unified: FinishToolCalls, Raw: "tool_use"},
+			Usage:        usage(1, 1),
+		}, nil
+	}}
+	result, err := GenerateText(context.Background(), GenerateTextOptions{
+		Model:    model,
+		Prompt:   "run tools",
+		StopWhen: []StopCondition{StepCount(1)},
+		Tools: map[string]Tool{
+			"a": {
+				Execute: func(ctx context.Context, _ ToolCall, _ ToolExecutionOptions) (any, error) {
+					close(aStarted)
+					select {
+					case <-bStarted:
+						return "a", nil
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(200 * time.Millisecond):
+						return nil, errors.New("tool b did not start before tool a completed")
+					}
+				},
+			},
+			"b": {
+				Execute: func(ctx context.Context, _ ToolCall, _ ToolExecutionOptions) (any, error) {
+					select {
+					case <-aStarted:
+						close(bStarted)
+						return "b", nil
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(200 * time.Millisecond):
+						return nil, errors.New("tool a did not start")
+					}
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("GenerateText failed: %v", err)
+	}
+	if len(result.ToolResults) != 2 {
+		t.Fatalf("expected two tool results, got %#v", result.ToolResults)
+	}
+	for _, toolResult := range result.ToolResults {
+		if toolResult.Output.Type != "text" {
+			t.Fatalf("expected successful tool result, got %#v", toolResult)
+		}
 	}
 }
 

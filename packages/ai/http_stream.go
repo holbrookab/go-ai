@@ -162,6 +162,13 @@ func streamPartPayload(part StreamPart) map[string]any {
 	if part.ID != "" {
 		payload["id"] = part.ID
 	}
+	if part.StepID != "" {
+		payload["stepId"] = part.StepID
+		payload["stepNumber"] = part.StepNumber
+	}
+	if part.StepType != "" {
+		payload["stepType"] = part.StepType
+	}
 	if part.TextDelta != "" {
 		payload["textDelta"] = part.TextDelta
 	}

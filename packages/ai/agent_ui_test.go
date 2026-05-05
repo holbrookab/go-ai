@@ -31,6 +31,7 @@ func TestCreateAgentUIStreamMapsTextAndFinishChunks(t *testing.T) {
 	}
 	want := []string{
 		UIMessageChunkTypeStart,
+		UIMessageChunkTypeStartStep,
 		UIMessageChunkTypeTextStart,
 		UIMessageChunkTypeTextDelta,
 		UIMessageChunkTypeFinishStep,
@@ -45,7 +46,10 @@ func TestCreateAgentUIStreamMapsTextAndFinishChunks(t *testing.T) {
 			t.Fatalf("types = %#v, want %#v", gotTypes, want)
 		}
 	}
-	if chunks[2].Delta != "hello" || chunks[len(chunks)-1].FinishReason != FinishStop {
+	if chunks[1].StepID != "step-0" || chunks[1].StepNumber == nil || *chunks[1].StepNumber != 0 || chunks[1].StepType != "initial" {
+		t.Fatalf("missing step metadata: %#v", chunks[1])
+	}
+	if chunks[3].Delta != "hello" || chunks[len(chunks)-1].FinishReason != FinishStop {
 		t.Fatalf("unexpected chunks: %#v", chunks)
 	}
 }

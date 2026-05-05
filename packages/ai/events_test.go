@@ -74,7 +74,7 @@ func TestStreamTextLifecycleChunkAndErrorEvents(t *testing.T) {
 	}
 	for range result.Stream {
 	}
-	if want := []string{"text-delta", "finish-step", "finish"}; !reflect.DeepEqual(chunks, want) {
+	if want := []string{"start-step", "text-delta", "finish-step", "finish"}; !reflect.DeepEqual(chunks, want) {
 		t.Fatalf("chunks = %#v, want %#v", chunks, want)
 	}
 	if !containsEvent(telemetry.names(), EventStreamTextFinish) {

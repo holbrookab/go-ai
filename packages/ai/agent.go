@@ -20,6 +20,7 @@ type AgentCallOptions struct {
 	Tools                 map[string]Tool
 	ActiveTools           []string
 	ToolChoice            ToolChoice
+	ToolExecution         ToolExecutionMode
 	ToolApproval          *ToolApprovalConfiguration
 	StopWhen              []StopCondition
 	MaxRetries            *int
@@ -62,6 +63,7 @@ type ToolLoopAgentSettings struct {
 	Tools                map[string]Tool
 	ActiveTools          []string
 	ToolChoice           ToolChoice
+	ToolExecution        ToolExecutionMode
 	ToolApproval         *ToolApprovalConfiguration
 	StopWhen             []StopCondition
 	MaxRetries           *int
@@ -106,6 +108,7 @@ type AgentPreparedCall struct {
 	Tools                 map[string]Tool
 	ActiveTools           []string
 	ToolChoice            *ToolChoice
+	ToolExecution         *ToolExecutionMode
 	ToolApproval          *ToolApprovalConfiguration
 	StopWhen              []StopCondition
 	MaxRetries            *int
@@ -169,6 +172,7 @@ func (a *ToolLoopAgent) Generate(ctx context.Context, opts AgentCallOptions) (*G
 		Tools:                 call.Tools,
 		ActiveTools:           opts.ActiveTools,
 		ToolChoice:            call.ToolChoice,
+		ToolExecution:         call.ToolExecution,
 		ToolApproval:          call.ToolApproval,
 		StopWhen:              call.StopWhen,
 		MaxRetries:            call.MaxRetries,
@@ -213,6 +217,7 @@ func (a *ToolLoopAgent) Stream(ctx context.Context, opts AgentStreamOptions) (*S
 			Tools:                 call.Tools,
 			ActiveTools:           opts.ActiveTools,
 			ToolChoice:            call.ToolChoice,
+			ToolExecution:         call.ToolExecution,
 			ToolApproval:          call.ToolApproval,
 			StopWhen:              call.StopWhen,
 			MaxRetries:            call.MaxRetries,
@@ -254,6 +259,7 @@ type preparedAgentCall struct {
 	Model                 LanguageModel
 	Tools                 map[string]Tool
 	ToolChoice            ToolChoice
+	ToolExecution         ToolExecutionMode
 	ToolApproval          *ToolApprovalConfiguration
 	StopWhen              []StopCondition
 	MaxRetries            *int
@@ -290,6 +296,7 @@ func (a *ToolLoopAgent) prepareCall(opts AgentCallOptions) (preparedAgentCall, e
 		Model:                 firstLanguageModel(optsModel(opts), settings.Model),
 		Tools:                 firstTools(opts.Tools, settings.Tools),
 		ToolChoice:            firstToolChoice(opts.ToolChoice, settings.ToolChoice),
+		ToolExecution:         firstToolExecution(opts.ToolExecution, settings.ToolExecution),
 		ToolApproval:          firstToolApproval(opts.ToolApproval, settings.ToolApproval),
 		StopWhen:              firstStopConditions(opts.StopWhen, settings.StopWhen, []StopCondition{StepCount(20)}),
 		MaxRetries:            firstIntPtr(opts.MaxRetries, settings.MaxRetries),
@@ -360,6 +367,9 @@ func applyPreparedAgentCall(call *preparedAgentCall, prepared *AgentPreparedCall
 	}
 	if prepared.ToolChoice != nil {
 		call.ToolChoice = *prepared.ToolChoice
+	}
+	if prepared.ToolExecution != nil {
+		call.ToolExecution = *prepared.ToolExecution
 	}
 	if prepared.ToolApproval != nil {
 		call.ToolApproval = prepared.ToolApproval
@@ -447,6 +457,15 @@ func firstToolChoice(values ...ToolChoice) ToolChoice {
 		}
 	}
 	return ToolChoice{}
+}
+
+func firstToolExecution(values ...ToolExecutionMode) ToolExecutionMode {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func firstToolApproval(values ...*ToolApprovalConfiguration) *ToolApprovalConfiguration {

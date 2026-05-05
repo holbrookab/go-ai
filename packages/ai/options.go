@@ -14,6 +14,7 @@ type GenerateTextOptions struct {
 	Tools                 map[string]Tool
 	ActiveTools           []string
 	ToolChoice            ToolChoice
+	ToolExecution         ToolExecutionMode
 	ToolApproval          *ToolApprovalConfiguration
 	StopWhen              []StopCondition
 	MaxRetries            *int
@@ -50,6 +51,13 @@ type StreamTextOptions struct {
 	OnChunk          func(ChunkEvent)
 	Transforms       []StreamTransform
 }
+
+type ToolExecutionMode string
+
+const (
+	ToolExecutionParallel   ToolExecutionMode = "parallel"
+	ToolExecutionSequential ToolExecutionMode = "sequential"
+)
 
 type StreamTransform func(context.Context, <-chan StreamPart, StreamTransformOptions) <-chan StreamPart
 
@@ -273,7 +281,9 @@ type EmbedManyResult struct {
 
 type StepResult struct {
 	CallID           string
+	StepID           string
 	StepNumber       int
+	StepType         string
 	Provider         string
 	ModelID          string
 	Content          []Part

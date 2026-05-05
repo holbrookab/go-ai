@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const Version = "0.2.3"
+const Version = "0.2.4"
 
 type ProviderOptions map[string]any
 type ProviderMetadata map[string]any
@@ -324,6 +324,9 @@ type EmbeddingUsage struct {
 type StreamPart struct {
 	Type             string
 	ID               string
+	StepID           string
+	StepNumber       int
+	StepType         string
 	TextDelta        string
 	PartialOutput    any
 	Element          any

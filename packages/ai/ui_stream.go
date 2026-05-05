@@ -80,6 +80,9 @@ type UIMessageChunk struct {
 	MessageID       string `json:"messageId,omitempty"`
 	MessageMetadata any    `json:"messageMetadata,omitempty"`
 	FinishReason    string `json:"finishReason,omitempty"`
+	StepID          string `json:"stepId,omitempty"`
+	StepNumber      *int   `json:"stepNumber,omitempty"`
+	StepType        string `json:"stepType,omitempty"`
 
 	Err error `json:"-"`
 }

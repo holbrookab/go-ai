@@ -79,6 +79,9 @@ func streamText(ctx context.Context, cancel context.CancelFunc, opts StreamTextO
 		}
 
 		stepNumber := len(result.Steps)
+		stepID := defaultStepID(stepNumber)
+		stepType := defaultStepType(stepNumber)
+		stepScope := streamStepScope{stepID: stepID, stepNumber: stepNumber, stepType: stepType}
 		model := opts.Model
 		system := opts.System
 		stepMessages := append([]Message{}, initialPrompt.Messages...)
@@ -181,6 +184,14 @@ func streamText(ctx context.Context, cancel context.CancelFunc, opts StreamTextO
 
 		var streamResult *LanguageModelStreamResult
 		callID := emitLanguageModelCallStart(ctx, opts.Telemetry, opts.TelemetryOptions, OperationStreamText, model, stepNumber, callOptions)
+		if !emitStreamChunk(ctx, opts, out, withStepScope(StreamPart{Type: "start-step"}, stepScope)) {
+			if cancelStep != nil {
+				cancelStep()
+			}
+			result.Aborted = true
+			result.AbortReason = abortReason(ctx.Err())
+			return
+		}
 		err = retry.Do(stepCtx, maxRetries, func() error {
 			result, err := model.DoStream(stepCtx, callOptions)
 			if err != nil {
@@ -222,12 +233,12 @@ func streamText(ctx context.Context, cancel context.CancelFunc, opts StreamTextO
 				cancelStep()
 			}
 		})
-		accumulated := consumeStreamStep(stepCtx, opts, streamResult, system, promptMessages, stepTools, cloneAnyMap(toolsContext), out)
+		accumulated := consumeStreamStep(stepCtx, opts, streamResult, system, promptMessages, stepTools, cloneAnyMap(toolsContext), stepScope, out)
 		emitLanguageModelStreamCallEnd(ctx, opts.Telemetry, opts.TelemetryOptions, OperationStreamText, model, stepNumber, callID, streamResult, accumulated)
-		if cancelStep != nil {
-			cancelStep()
-		}
 		if accumulated.aborted {
+			if cancelStep != nil {
+				cancelStep()
+			}
 			result.Request = streamResult.Request
 			result.Response = streamResult.Response
 			result.Aborted = true
@@ -236,10 +247,24 @@ func streamText(ctx context.Context, cancel context.CancelFunc, opts StreamTextO
 			return
 		}
 		if accumulated.err != nil {
+			if cancelStep != nil {
+				cancelStep()
+			}
 			result.Request = streamResult.Request
 			result.Response = streamResult.Response
 			sendStreamError(ctx, opts, out, accumulated.err)
 			return
+		}
+
+		executedToolResults := executePendingStreamTools(stepCtx, opts, promptMessages, cloneAnyMap(toolsContext), accumulated.pendingToolExecutions, stepScope, out)
+		if len(executedToolResults) > 0 {
+			for _, result := range executedToolResults {
+				accumulated.content = append(accumulated.content, result)
+				accumulated.toolResults = append(accumulated.toolResults, result)
+			}
+		}
+		if cancelStep != nil {
+			cancelStep()
 		}
 
 		toolCalls, parsedContent, err := parseToolCalls(stepCtx, accumulated.content, parseToolCallsOptions{Tools: stepTools})
@@ -278,7 +303,9 @@ func streamText(ctx context.Context, cancel context.CancelFunc, opts StreamTextO
 
 		step := &StepResult{
 			CallID:           callID,
+			StepID:           stepID,
 			StepNumber:       stepNumber,
+			StepType:         stepType,
 			Provider:         model.Provider(),
 			ModelID:          model.ModelID(),
 			Content:          accumulated.content,
@@ -309,7 +336,7 @@ func streamText(ctx context.Context, cancel context.CancelFunc, opts StreamTextO
 		result.ToolResults = step.ToolResults
 		emitStepFinish(ctx, opts.Telemetry, opts.TelemetryOptions, opts.OnStepFinish, EventStreamTextStepFinish, OperationStreamText, step)
 
-		emitStreamChunk(ctx, opts, out, StreamPart{Type: "finish-step", FinishReason: accumulated.finishReason, Usage: accumulated.usage, Warnings: accumulated.warnings, ProviderMetadata: accumulated.providerMetadata})
+		emitStreamChunk(ctx, opts, out, withStepScope(StreamPart{Type: "finish-step", FinishReason: accumulated.finishReason, Usage: accumulated.usage, Warnings: accumulated.warnings, ProviderMetadata: accumulated.providerMetadata}, stepScope))
 
 		shouldStop, err := stopConditionMet(ctx, stopWhen, result.Steps)
 		if err != nil {
@@ -346,19 +373,31 @@ func streamText(ctx context.Context, cancel context.CancelFunc, opts StreamTextO
 }
 
 type streamStepAccumulation struct {
-	content          []Part
-	finishReason     FinishReason
-	usage            Usage
-	warnings         []Warning
-	providerMetadata ProviderMetadata
-	toolResults      []ToolResultPart
-	aborted          bool
-	abortErr         error
-	abortReason      string
-	err              error
+	content               []Part
+	finishReason          FinishReason
+	usage                 Usage
+	warnings              []Warning
+	providerMetadata      ProviderMetadata
+	toolResults           []ToolResultPart
+	pendingToolExecutions []pendingStreamToolExecution
+	aborted               bool
+	abortErr              error
+	abortReason           string
+	err                   error
 }
 
-func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult *LanguageModelStreamResult, system string, promptMessages []Message, tools map[string]Tool, toolsContext map[string]any, out chan<- StreamPart) streamStepAccumulation {
+type streamStepScope struct {
+	stepID     string
+	stepNumber int
+	stepType   string
+}
+
+type pendingStreamToolExecution struct {
+	call ToolCall
+	tool Tool
+}
+
+func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult *LanguageModelStreamResult, system string, promptMessages []Message, tools map[string]Tool, toolsContext map[string]any, stepScope streamStepScope, out chan<- StreamPart) streamStepAccumulation {
 	acc := streamStepAccumulation{finishReason: FinishReason{Unified: FinishUnknown}}
 	toolInput := map[string]string{}
 	blocked := map[string]bool{}
@@ -378,6 +417,11 @@ func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult
 			return acc
 		case part, ok = <-streamResult.Stream:
 			if !ok {
+				if err := ctx.Err(); err != nil {
+					acc.aborted = true
+					acc.abortErr = err
+					acc.abortReason = abortReason(err)
+				}
 				return acc
 			}
 		}
@@ -393,12 +437,12 @@ func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult
 			return acc
 		case "stream-start":
 			acc.warnings = append(acc.warnings, part.Warnings...)
-			emitStreamChunk(ctx, opts, out, part)
+			emitStreamChunk(ctx, opts, out, withStepScope(part, stepScope))
 		case "response-metadata":
 			if part.Response.ID != "" || !part.Response.Timestamp.IsZero() || part.Response.ModelID != "" || len(part.Response.Headers) > 0 || part.Response.Body != nil || len(part.Response.Messages) > 0 {
 				streamResult.Response = part.Response
 			}
-			emitStreamChunk(ctx, opts, out, part)
+			emitStreamChunk(ctx, opts, out, withStepScope(part, stepScope))
 		case "text-delta":
 			acc.content = appendTextDelta(acc.content, part.TextDelta, part.ProviderMetadata)
 			textOutput += part.TextDelta
@@ -412,12 +456,12 @@ func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult
 				lastPartialOutput = partial.Value
 				haveLastPartialOutput = true
 			}
-			emitStreamChunk(ctx, opts, out, part)
+			emitStreamChunk(ctx, opts, out, withStepScope(part, stepScope))
 			if partial.OK {
 				var elements []any
 				elements, publishedElements = elementsFromPartialOutput(opts.Output, partial.Value, publishedElements)
 				for _, element := range elements {
-					if !emitStreamChunk(ctx, opts, out, StreamPart{Type: "element", Element: element}) {
+					if !emitStreamChunk(ctx, opts, out, withStepScope(StreamPart{Type: "element", Element: element}, stepScope)) {
 						acc.aborted = true
 						acc.abortErr = ctx.Err()
 						acc.abortReason = abortReason(ctx.Err())
@@ -427,20 +471,20 @@ func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult
 			}
 		case "reasoning-delta":
 			acc.content = appendReasoningDelta(acc.content, part.ReasoningDelta, part.ProviderMetadata)
-			emitStreamChunk(ctx, opts, out, part)
+			emitStreamChunk(ctx, opts, out, withStepScope(part, stepScope))
 		case "file", "source":
 			if part.Content != nil {
 				acc.content = append(acc.content, part.Content)
 			}
-			emitStreamChunk(ctx, opts, out, part)
+			emitStreamChunk(ctx, opts, out, withStepScope(part, stepScope))
 		case "tool-input-delta":
 			toolInput[part.ToolCallID] += part.ToolInputDelta
-			emitStreamChunk(ctx, opts, out, part)
+			emitStreamChunk(ctx, opts, out, withStepScope(part, stepScope))
 		case "tool-input-end":
 			if part.ToolInput != "" {
 				toolInput[part.ToolCallID] = part.ToolInput
 			}
-			emitStreamChunk(ctx, opts, out, part)
+			emitStreamChunk(ctx, opts, out, withStepScope(part, stepScope))
 		case "tool-call":
 			input := part.ToolInput
 			if input == "" {
@@ -462,7 +506,7 @@ func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult
 				input = toolPart.InputJSON()
 			}
 			acc.content = append(acc.content, toolPart)
-			emitStreamChunk(ctx, opts, out, StreamPart{Type: "tool-call", ToolCallID: toolPart.ToolCallID, ToolName: toolPart.ToolName, ToolInput: input, ProviderMetadata: toolPart.ProviderMetadata, Raw: part.Raw})
+			emitStreamChunk(ctx, opts, out, withStepScope(StreamPart{Type: "tool-call", ToolCallID: toolPart.ToolCallID, ToolName: toolPart.ToolName, ToolInput: input, ProviderMetadata: toolPart.ProviderMetadata, Raw: part.Raw}, stepScope))
 
 			tool, ok := tools[call.ToolName]
 			if !ok || tool.Execute == nil || call.Invalid {
@@ -485,16 +529,13 @@ func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult
 					}
 					acc.content = append(acc.content, result)
 					acc.toolResults = append(acc.toolResults, result)
-					emitStreamChunk(ctx, opts, out, StreamPart{Type: "tool-result", ToolCallID: result.ToolCallID, ToolName: result.ToolName, Content: result})
+					emitStreamChunk(ctx, opts, out, withStepScope(StreamPart{Type: "tool-result", ToolCallID: result.ToolCallID, ToolName: result.ToolName, Content: result}, stepScope))
 				}
 			}
 			if blocked[call.ToolCallID] {
 				continue
 			}
-			result := executeTool(ctx, opts.Timeout.Tool, call, tool, promptMessages, cloneAnyMap(toolsContext), opts.OnToolExecutionStart, opts.OnToolExecutionEnd)
-			acc.content = append(acc.content, result)
-			acc.toolResults = append(acc.toolResults, result)
-			emitStreamChunk(ctx, opts, out, StreamPart{Type: "tool-result", ToolCallID: result.ToolCallID, ToolName: result.ToolName, Content: result})
+			acc.pendingToolExecutions = append(acc.pendingToolExecutions, pendingStreamToolExecution{call: call, tool: tool})
 		case "finish":
 			acc.finishReason = part.FinishReason
 			acc.usage = part.Usage
@@ -502,10 +543,40 @@ func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult
 			acc.providerMetadata = part.ProviderMetadata
 		default:
 			if opts.IncludeRawChunks || part.Type != "raw" {
-				emitStreamChunk(ctx, opts, out, part)
+				emitStreamChunk(ctx, opts, out, withStepScope(part, stepScope))
 			}
 		}
 	}
+}
+
+func executePendingStreamTools(ctx context.Context, opts StreamTextOptions, messages []Message, toolsContext map[string]any, pending []pendingStreamToolExecution, stepScope streamStepScope, out chan<- StreamPart) []ToolResultPart {
+	if len(pending) == 0 {
+		return nil
+	}
+	calls := make([]ToolCall, 0, len(pending))
+	tools := map[string]Tool{}
+	for _, item := range pending {
+		calls = append(calls, item.call)
+		tools[item.call.ToolName] = item.tool
+	}
+	results := executeToolCalls(ctx, calls, tools, messages, toolsContext, opts.Timeout.Tool, opts.ToolExecution, nil, nil, opts.OnToolExecutionStart, opts.OnToolExecutionEnd)
+	for _, result := range results {
+		if !emitStreamChunk(ctx, opts, out, withStepScope(StreamPart{Type: "tool-result", ToolCallID: result.ToolCallID, ToolName: result.ToolName, Content: result}, stepScope)) {
+			break
+		}
+	}
+	return results
+}
+
+func withStepScope(part StreamPart, scope streamStepScope) StreamPart {
+	if part.StepID == "" {
+		part.StepID = scope.stepID
+	}
+	part.StepNumber = scope.stepNumber
+	if part.StepType == "" {
+		part.StepType = scope.stepType
+	}
+	return part
 }
 
 func appendTextDelta(parts []Part, delta string, metadata ProviderMetadata) []Part {
