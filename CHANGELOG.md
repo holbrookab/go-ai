@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2 - 2026-05-05
+
+- Fixed Vertex message mapping so provider-facing messages use `Message.Text` as a fallback and skip empty content entries instead of sending empty `parts` arrays.
+
+## 0.2.1 - 2026-05-05
+
+- Aligned tool approval behavior with AI SDK semantics.
+
 ## 0.2.0 - 2026-05-01
 
 - Expanded `packages/ai` toward Vercel AI SDK parity, including object generation, embeddings, agents, UI message streams, middleware, richer error types, media/upload helpers, and stricter schema validation.

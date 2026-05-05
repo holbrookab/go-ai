@@ -220,26 +220,41 @@ func googleMessages(messages []ai.Message, isGemma bool) ([]map[string]any, []ma
 					pendingSystem += "\n"
 				}
 				pendingSystem += message.Text
-			} else {
+			} else if message.Text != "" {
 				system = append(system, map[string]string{"text": message.Text})
 			}
 		case ai.RoleUser:
-			parts := googleUserParts(message.Content)
+			parts := googleUserParts(messageContent(message))
 			if pendingSystem != "" {
 				parts = append([]map[string]any{{"text": pendingSystem}}, parts...)
 				pendingSystem = ""
 			}
-			contents = append(contents, map[string]any{"role": "user", "parts": parts})
+			if len(parts) > 0 {
+				contents = append(contents, map[string]any{"role": "user", "parts": parts})
+			}
 		case ai.RoleAssistant:
-			contents = append(contents, map[string]any{"role": "model", "parts": googleAssistantParts(message.Content)})
+			parts := googleAssistantParts(messageContent(message))
+			if len(parts) > 0 {
+				contents = append(contents, map[string]any{"role": "model", "parts": parts})
+			}
 		case ai.RoleTool:
-			contents = append(contents, map[string]any{"role": "user", "parts": googleToolResultParts(message.Content)})
+			parts := googleToolResultParts(messageContent(message))
+			if len(parts) > 0 {
+				contents = append(contents, map[string]any{"role": "user", "parts": parts})
+			}
 		}
 	}
 	if pendingSystem != "" {
 		contents = append([]map[string]any{{"role": "user", "parts": []map[string]any{{"text": pendingSystem}}}}, contents...)
 	}
 	return contents, system
+}
+
+func messageContent(message ai.Message) []ai.Part {
+	if len(message.Content) > 0 || message.Text == "" {
+		return message.Content
+	}
+	return []ai.Part{ai.TextPart{Text: message.Text}}
 }
 
 func googleUserParts(parts []ai.Part) []map[string]any {

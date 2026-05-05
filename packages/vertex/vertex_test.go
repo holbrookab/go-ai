@@ -96,6 +96,38 @@ func TestOAuthGlobalBaseURL(t *testing.T) {
 	}
 }
 
+func TestMessageTextFallbackAndEmptyContentSkipped(t *testing.T) {
+	client := &captureClient{response: `{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`}
+	provider := New(Settings{
+		APIKey: "key",
+		Client: client,
+	})
+	_, err := provider.LanguageModel("gemini-2.5-flash").DoGenerate(context.Background(), ai.LanguageModelCallOptions{
+		Prompt: []ai.Message{
+			{Role: ai.RoleUser, Text: "hello from temporal wire"},
+			{Role: ai.RoleAssistant},
+		},
+	})
+	if err != nil {
+		t.Fatalf("DoGenerate failed: %v", err)
+	}
+	var body struct {
+		Contents []struct {
+			Role  string           `json:"role"`
+			Parts []map[string]any `json:"parts"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(client.body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Contents) != 1 {
+		t.Fatalf("expected empty assistant content to be skipped, got %#v", body.Contents)
+	}
+	if body.Contents[0].Role != "user" || len(body.Contents[0].Parts) != 1 || body.Contents[0].Parts[0]["text"] != "hello from temporal wire" {
+		t.Fatalf("unexpected contents: %#v", body.Contents)
+	}
+}
+
 func TestStreamParsesSSE(t *testing.T) {
 	client := &captureClient{response: "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"he\"}]}}]}\n\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"llo\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":2}}\n\n"}
 	provider := New(Settings{
