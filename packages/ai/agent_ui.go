@@ -77,10 +77,10 @@ func writeStreamTextResultAsUIMessageChunks(ctx context.Context, writer UIMessag
 		switch part.Type {
 		case "text-delta":
 			if !textStarted {
-				writer.Write(TextStartUIMessageChunk(textID))
+				writer.Write(UIMessageChunk{Type: UIMessageChunkTypeTextStart, ID: textID, ProviderMetadata: part.ProviderMetadata})
 				textStarted = true
 			}
-			writer.Write(TextDeltaUIMessageChunk(textID, part.TextDelta))
+			writer.Write(UIMessageChunk{Type: UIMessageChunkTypeTextDelta, ID: textID, Delta: part.TextDelta, ProviderMetadata: part.ProviderMetadata})
 		case "reasoning-delta":
 			id := part.ID
 			if id == "" {
@@ -118,7 +118,7 @@ func writeStreamTextResultAsUIMessageChunks(ctx context.Context, writer UIMessag
 			writer.Write(UIMessageChunk{Type: UIMessageChunkTypeToolOutputAvailable, ToolCallID: part.ToolCallID, Output: output, ProviderMetadata: part.ProviderMetadata})
 		case "file":
 			if file, ok := part.Content.(FilePart); ok {
-				writer.Write(UIMessageChunk{Type: UIMessageChunkTypeFile, URL: file.Data.URL, MediaType: file.MediaType, Filename: file.Filename, ProviderMetadata: ProviderMetadata(file.ProviderOptions)})
+				writer.Write(UIMessageChunk{Type: UIMessageChunkTypeFile, URL: file.Data.URL, MediaType: file.MediaType, Filename: file.Filename, ProviderMetadata: mergeMetadata(ProviderMetadata(file.ProviderOptions), file.ProviderMetadata)})
 			}
 		case "source":
 			chunk := UIMessageChunk{Type: UIMessageChunkTypeSourceURL, SourceID: part.ID, ProviderMetadata: part.ProviderMetadata}

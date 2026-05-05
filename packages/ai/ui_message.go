@@ -296,7 +296,7 @@ func convertUserUIParts(parts []UIPart, opts ConvertToModelMessagesOptions) ([]P
 	for _, part := range parts {
 		switch {
 		case IsTextUIPart(part):
-			content = append(content, TextPart{Text: part.Text, ProviderOptions: ProviderOptions(part.ProviderMetadata)})
+			content = append(content, TextPart{Text: part.Text, ProviderMetadata: part.ProviderMetadata, ProviderOptions: ProviderOptions(part.ProviderMetadata)})
 		case IsFileUIPart(part):
 			content = append(content, fileUIPartToModelPart(part))
 		case IsDataUIPart(part) && opts.ConvertDataPart != nil:
@@ -324,7 +324,7 @@ func convertAssistantUIMessage(message UIMessage, opts ConvertToModelMessagesOpt
 		for _, part := range block {
 			switch {
 			case IsTextUIPart(part):
-				content = append(content, TextPart{Text: part.Text, ProviderOptions: ProviderOptions(part.ProviderMetadata)})
+				content = append(content, TextPart{Text: part.Text, ProviderMetadata: part.ProviderMetadata, ProviderOptions: ProviderOptions(part.ProviderMetadata)})
 			case IsReasoningUIPart(part):
 				content = append(content, ReasoningPart{Text: part.Text, ProviderOptions: ProviderOptions(part.ProviderMetadata), ProviderMetadata: part.ProviderMetadata})
 			case IsReasoningFileUIPart(part):
@@ -486,10 +486,11 @@ func toolCallUIPartToModelPart(part UIPart) ToolCallPart {
 
 func fileUIPartToModelPart(part UIPart) FilePart {
 	return FilePart{
-		Data:            fileDataFromUIPart(part),
-		MediaType:       part.MediaType,
-		Filename:        part.Filename,
-		ProviderOptions: ProviderOptions(part.ProviderMetadata),
+		Data:             fileDataFromUIPart(part),
+		MediaType:        part.MediaType,
+		Filename:         part.Filename,
+		ProviderMetadata: part.ProviderMetadata,
+		ProviderOptions:  ProviderOptions(part.ProviderMetadata),
 	}
 }
 
@@ -516,9 +517,9 @@ func partsToUIParts(parts []Part) []UIPart {
 	for _, part := range parts {
 		switch part := part.(type) {
 		case TextPart:
-			out = append(out, UIPart{Type: "text", Text: part.Text, State: "done", ProviderMetadata: ProviderMetadata(part.ProviderOptions)})
+			out = append(out, UIPart{Type: "text", Text: part.Text, State: "done", ProviderMetadata: mergeMetadata(ProviderMetadata(part.ProviderOptions), part.ProviderMetadata)})
 		case FilePart:
-			uiPart := UIPart{Type: "file", MediaType: part.MediaType, Filename: part.Filename, URL: part.Data.URL, ProviderMetadata: ProviderMetadata(part.ProviderOptions)}
+			uiPart := UIPart{Type: "file", MediaType: part.MediaType, Filename: part.Filename, URL: part.Data.URL, ProviderMetadata: mergeMetadata(ProviderMetadata(part.ProviderOptions), part.ProviderMetadata)}
 			if part.Data.Type == "reference" {
 				uiPart.ProviderReference = part.Data.Reference
 			}

@@ -400,7 +400,7 @@ func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult
 			}
 			emitStreamChunk(ctx, opts, out, part)
 		case "text-delta":
-			acc.content = appendTextDelta(acc.content, part.TextDelta)
+			acc.content = appendTextDelta(acc.content, part.TextDelta, part.ProviderMetadata)
 			textOutput += part.TextDelta
 			partial, err := parsePartialTextOutput(opts.Output, textOutput)
 			if err != nil {
@@ -508,18 +508,19 @@ func consumeStreamStep(ctx context.Context, opts StreamTextOptions, streamResult
 	}
 }
 
-func appendTextDelta(parts []Part, delta string) []Part {
+func appendTextDelta(parts []Part, delta string, metadata ProviderMetadata) []Part {
 	if delta == "" {
 		return parts
 	}
 	if len(parts) > 0 {
 		if text, ok := parts[len(parts)-1].(TextPart); ok {
 			text.Text += delta
+			text.ProviderMetadata = mergeMetadata(text.ProviderMetadata, metadata)
 			parts[len(parts)-1] = text
 			return parts
 		}
 	}
-	return append(parts, TextPart{Text: delta})
+	return append(parts, TextPart{Text: delta, ProviderMetadata: metadata})
 }
 
 func appendReasoningDelta(parts []Part, delta string, metadata ProviderMetadata) []Part {

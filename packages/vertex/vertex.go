@@ -281,11 +281,21 @@ func googleAssistantParts(parts []ai.Part) []map[string]any {
 	for _, part := range parts {
 		switch p := part.(type) {
 		case ai.TextPart:
-			out = append(out, map[string]any{"text": p.Text})
+			out = append(out, withThoughtSignature(map[string]any{"text": p.Text}, p.ProviderMetadata, p.ProviderOptions))
 		case ai.ReasoningPart:
-			out = append(out, map[string]any{"text": p.Text, "thought": true})
+			out = append(out, withThoughtSignature(map[string]any{"text": p.Text, "thought": true}, p.ProviderMetadata, p.ProviderOptions))
+		case ai.ReasoningFilePart:
+			if len(p.Data.Data) > 0 {
+				out = append(out, withThoughtSignature(map[string]any{"inlineData": map[string]any{"mimeType": mediaType(p.MediaType, "application/octet-stream"), "data": base64.StdEncoding.EncodeToString(p.Data.Data)}, "thought": true}, p.ProviderMetadata, p.ProviderOptions))
+			}
+		case ai.FilePart:
+			if p.Data.Text != "" {
+				out = append(out, withThoughtSignature(map[string]any{"inlineData": map[string]any{"mimeType": mediaType(p.MediaType, "text/plain"), "data": base64.StdEncoding.EncodeToString([]byte(p.Data.Text))}}, p.ProviderMetadata, p.ProviderOptions))
+			} else if len(p.Data.Data) > 0 {
+				out = append(out, withThoughtSignature(map[string]any{"inlineData": map[string]any{"mimeType": mediaType(p.MediaType, "application/octet-stream"), "data": base64.StdEncoding.EncodeToString(p.Data.Data)}}, p.ProviderMetadata, p.ProviderOptions))
+			}
 		case ai.ToolCallPart:
-			out = append(out, map[string]any{"functionCall": map[string]any{"name": p.ToolName, "args": p.Input}})
+			out = append(out, withThoughtSignature(map[string]any{"functionCall": map[string]any{"name": p.ToolName, "args": p.Input}}, p.ProviderMetadata, p.ProviderOptions))
 		}
 	}
 	return out
@@ -373,17 +383,19 @@ func (m *LanguageModel) parseContent(response generateContentResponse) []ai.Part
 	for _, part := range response.Candidates[0].Content.Parts {
 		switch {
 		case part.Text != "":
+			metadata := thoughtMetadata(part.ThoughtSignature)
 			if part.Thought {
-				out = append(out, ai.ReasoningPart{Text: part.Text, ProviderMetadata: thoughtMetadata(part.ThoughtSignature)})
+				out = append(out, ai.ReasoningPart{Text: part.Text, ProviderMetadata: metadata})
 			} else {
-				out = append(out, ai.TextPart{Text: part.Text, ProviderOptions: nil})
+				out = append(out, ai.TextPart{Text: part.Text, ProviderMetadata: metadata, ProviderOptions: nil})
 			}
 		case part.FunctionCall != nil:
 			out = append(out, ai.ToolCallPart{ToolCallID: m.generateID(), ToolName: part.FunctionCall.Name, InputRaw: mustJSON(part.FunctionCall.Args), ProviderMetadata: thoughtMetadata(part.ThoughtSignature)})
 		case part.InlineData != nil:
-			file := ai.FilePart{MediaType: part.InlineData.MimeType, Data: ai.FileData{Type: "data", Data: []byte(part.InlineData.Data)}, ProviderOptions: nil}
+			metadata := thoughtMetadata(part.ThoughtSignature)
+			file := ai.FilePart{MediaType: part.InlineData.MimeType, Data: ai.FileData{Type: "data", Data: []byte(part.InlineData.Data)}, ProviderMetadata: metadata, ProviderOptions: nil}
 			if part.Thought {
-				out = append(out, ai.ReasoningFilePart{MediaType: file.MediaType, Data: file.Data, ProviderMetadata: thoughtMetadata(part.ThoughtSignature)})
+				out = append(out, ai.ReasoningFilePart{MediaType: file.MediaType, Data: file.Data, ProviderMetadata: metadata})
 			} else {
 				out = append(out, file)
 			}
@@ -431,22 +443,29 @@ func (m *LanguageModel) scanSSE(r io.Reader, out chan<- ai.StreamPart) {
 		}
 		for _, part := range c.Content.Parts {
 			if part.Text != "" {
+				metadata := thoughtMetadata(part.ThoughtSignature)
 				if part.Thought {
-					out <- ai.StreamPart{Type: "reasoning-delta", ReasoningDelta: part.Text}
+					out <- ai.StreamPart{Type: "reasoning-delta", ReasoningDelta: part.Text, ProviderMetadata: metadata}
 				} else {
-					out <- ai.StreamPart{Type: "text-delta", TextDelta: part.Text}
+					out <- ai.StreamPart{Type: "text-delta", TextDelta: part.Text, ProviderMetadata: metadata}
 				}
 			}
 			if part.FunctionCall != nil && part.FunctionCall.Name != "" {
 				input := mustJSON(part.FunctionCall.Args)
 				id := m.generateID()
-				out <- ai.StreamPart{Type: "tool-input-start", ToolCallID: id, ToolName: part.FunctionCall.Name}
-				out <- ai.StreamPart{Type: "tool-input-delta", ToolCallID: id, ToolName: part.FunctionCall.Name, ToolInputDelta: input}
-				out <- ai.StreamPart{Type: "tool-input-end", ToolCallID: id, ToolName: part.FunctionCall.Name, ToolInput: input}
-				out <- ai.StreamPart{Type: "tool-call", ToolCallID: id, ToolName: part.FunctionCall.Name, ToolInput: input}
+				metadata := thoughtMetadata(part.ThoughtSignature)
+				out <- ai.StreamPart{Type: "tool-input-start", ToolCallID: id, ToolName: part.FunctionCall.Name, ProviderMetadata: metadata}
+				out <- ai.StreamPart{Type: "tool-input-delta", ToolCallID: id, ToolName: part.FunctionCall.Name, ToolInputDelta: input, ProviderMetadata: metadata}
+				out <- ai.StreamPart{Type: "tool-input-end", ToolCallID: id, ToolName: part.FunctionCall.Name, ToolInput: input, ProviderMetadata: metadata}
+				out <- ai.StreamPart{Type: "tool-call", ToolCallID: id, ToolName: part.FunctionCall.Name, ToolInput: input, ProviderMetadata: metadata}
 			}
 			if part.InlineData != nil {
-				out <- ai.StreamPart{Type: "file", Content: ai.FilePart{MediaType: part.InlineData.MimeType, Data: ai.FileData{Type: "data", Data: []byte(part.InlineData.Data)}}}
+				metadata := thoughtMetadata(part.ThoughtSignature)
+				if part.Thought {
+					out <- ai.StreamPart{Type: "file", Content: ai.ReasoningFilePart{MediaType: part.InlineData.MimeType, Data: ai.FileData{Type: "data", Data: []byte(part.InlineData.Data)}, ProviderMetadata: metadata}, ProviderMetadata: metadata}
+				} else {
+					out <- ai.StreamPart{Type: "file", Content: ai.FilePart{MediaType: part.InlineData.MimeType, Data: ai.FileData{Type: "data", Data: []byte(part.InlineData.Data)}, ProviderMetadata: metadata}, ProviderMetadata: metadata}
+				}
 			}
 		}
 		for _, source := range extractSources(c.GroundingMetadata, m.generateID) {
@@ -600,7 +619,45 @@ func thoughtMetadata(signature string) ai.ProviderMetadata {
 		return nil
 	}
 	payload := map[string]any{"thoughtSignature": signature}
-	return ai.ProviderMetadata{"googleVertex": payload, "vertex": payload}
+	return ai.ProviderMetadata{"googleVertex": payload, "vertex": payload, "google": payload}
+}
+
+func withThoughtSignature(part map[string]any, metadata ai.ProviderMetadata, options ai.ProviderOptions) map[string]any {
+	if signature := thoughtSignature(metadata, options); signature != "" {
+		part["thoughtSignature"] = signature
+	}
+	return part
+}
+
+func thoughtSignature(metadata ai.ProviderMetadata, options ai.ProviderOptions) string {
+	if signature := thoughtSignatureFromMap(map[string]any(metadata)); signature != "" {
+		return signature
+	}
+	return thoughtSignatureFromMap(map[string]any(options))
+}
+
+func thoughtSignatureFromMap(values map[string]any) string {
+	for _, namespace := range []string{"googleVertex", "vertex", "google"} {
+		raw, ok := values[namespace]
+		if !ok {
+			continue
+		}
+		switch typed := raw.(type) {
+		case map[string]any:
+			if signature, ok := typed["thoughtSignature"].(string); ok && signature != "" {
+				return signature
+			}
+		case ai.ProviderMetadata:
+			if signature, ok := typed["thoughtSignature"].(string); ok && signature != "" {
+				return signature
+			}
+		case ai.ProviderOptions:
+			if signature, ok := typed["thoughtSignature"].(string); ok && signature != "" {
+				return signature
+			}
+		}
+	}
+	return ""
 }
 
 func (m *LanguageModel) metadata(response generateContentResponse) ai.ProviderMetadata {

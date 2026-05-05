@@ -128,6 +128,79 @@ func TestMessageTextFallbackAndEmptyContentSkipped(t *testing.T) {
 	}
 }
 
+func TestThoughtSignatureRoundTripsInGenerateContent(t *testing.T) {
+	client := &captureClient{response: `{
+		"candidates":[{
+			"content":{"parts":[
+				{"text":"visible","thoughtSignature":"text-sig"},
+				{"text":"reason","thought":true,"thoughtSignature":"reason-sig"},
+				{"functionCall":{"name":"extractDocument","args":{"id":"doc-1"}},"thoughtSignature":"tool-sig"}
+			]},
+			"finishReason":"STOP"
+		}]
+	}`}
+	provider := New(Settings{
+		APIKey:     "key",
+		Client:     client,
+		GenerateID: sequenceID("call-1"),
+	})
+	result, err := provider.LanguageModel("gemini-2.5-flash").DoGenerate(context.Background(), ai.LanguageModelCallOptions{
+		Prompt: []ai.Message{
+			{
+				Role: ai.RoleAssistant,
+				Content: []ai.Part{
+					ai.TextPart{Text: "visible", ProviderMetadata: ai.ProviderMetadata{"google": map[string]any{"thoughtSignature": "text-sig"}}},
+					ai.ReasoningPart{Text: "reason", ProviderMetadata: ai.ProviderMetadata{"vertex": map[string]any{"thoughtSignature": "reason-sig"}}},
+					ai.ToolCallPart{ToolCallID: "call-1", ToolName: "extractDocument", Input: map[string]any{"id": "doc-1"}, ProviderMetadata: ai.ProviderMetadata{"googleVertex": map[string]any{"thoughtSignature": "tool-sig"}}},
+				},
+			},
+			{
+				Role: ai.RoleTool,
+				Content: []ai.Part{
+					ai.ToolResultPart{ToolCallID: "call-1", ToolName: "extractDocument", Output: ai.ToolResultOutput{Type: "text", Value: "done"}, ProviderMetadata: ai.ProviderMetadata{"googleVertex": map[string]any{"thoughtSignature": "tool-sig"}}},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("DoGenerate failed: %v", err)
+	}
+
+	var body struct {
+		Contents []struct {
+			Parts []map[string]any `json:"parts"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(client.body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if got := body.Contents[0].Parts[0]["thoughtSignature"]; got != "text-sig" {
+		t.Fatalf("text thought signature = %#v", got)
+	}
+	if got := body.Contents[0].Parts[1]["thoughtSignature"]; got != "reason-sig" {
+		t.Fatalf("reasoning thought signature = %#v", got)
+	}
+	if got := body.Contents[0].Parts[2]["thoughtSignature"]; got != "tool-sig" {
+		t.Fatalf("tool-call thought signature = %#v", got)
+	}
+	if _, ok := body.Contents[1].Parts[0]["thoughtSignature"]; ok {
+		t.Fatalf("functionResponse should not include thoughtSignature: %#v", body.Contents[1].Parts[0])
+	}
+
+	text, ok := result.Content[0].(ai.TextPart)
+	if !ok || thoughtSignature(text.ProviderMetadata, nil) != "text-sig" {
+		t.Fatalf("text part metadata not preserved: %#v", result.Content[0])
+	}
+	reasoning, ok := result.Content[1].(ai.ReasoningPart)
+	if !ok || thoughtSignature(reasoning.ProviderMetadata, nil) != "reason-sig" {
+		t.Fatalf("reasoning metadata not preserved: %#v", result.Content[1])
+	}
+	call, ok := result.Content[2].(ai.ToolCallPart)
+	if !ok || thoughtSignature(call.ProviderMetadata, nil) != "tool-sig" {
+		t.Fatalf("tool call metadata not preserved: %#v", result.Content[2])
+	}
+}
+
 func TestStreamParsesSSE(t *testing.T) {
 	client := &captureClient{response: "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"he\"}]}}]}\n\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"llo\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":2}}\n\n"}
 	provider := New(Settings{
@@ -159,9 +232,45 @@ func TestStreamParsesSSE(t *testing.T) {
 	}
 }
 
+func TestStreamToolCallPreservesThoughtSignature(t *testing.T) {
+	client := &captureClient{response: "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"extractDocument\",\"args\":{\"id\":\"doc-1\"}},\"thoughtSignature\":\"stream-sig\"}]},\"finishReason\":\"STOP\"}]}\n\n"}
+	provider := New(Settings{
+		APIKey:     "key",
+		Client:     client,
+		GenerateID: sequenceID("call-1"),
+	})
+	result, err := provider.LanguageModel("gemini-2.5-flash").DoStream(context.Background(), ai.LanguageModelCallOptions{
+		Prompt: []ai.Message{ai.UserMessage("hello")},
+	})
+	if err != nil {
+		t.Fatalf("DoStream failed: %v", err)
+	}
+	var call ai.StreamPart
+	for part := range result.Stream {
+		if part.Type == "tool-call" {
+			call = part
+		}
+	}
+	if call.ToolName != "extractDocument" || thoughtSignature(call.ProviderMetadata, nil) != "stream-sig" {
+		t.Fatalf("stream tool call metadata not preserved: %#v", call)
+	}
+}
+
 type aiToken string
 
 func (t aiToken) Token(context.Context) (string, error) { return string(t), nil }
+
+func sequenceID(ids ...string) func() string {
+	index := 0
+	return func() string {
+		if index >= len(ids) {
+			return "id"
+		}
+		id := ids[index]
+		index++
+		return id
+	}
+}
 
 type captureClient struct {
 	request  *http.Request

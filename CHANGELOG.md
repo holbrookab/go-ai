@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.3 - 2026-05-05
+
+- Fixed Vertex thought signature round-tripping for replayed assistant text, reasoning, file, and function call parts.
+
 ## 0.2.2 - 2026-05-05
 
 - Fixed Vertex message mapping so provider-facing messages use `Message.Text` as a fallback and skip empty content entries instead of sending empty `parts` arrays.

@@ -296,8 +296,8 @@ func TestConvertToModelMessagesConvertsSystemAndUserParts(t *testing.T) {
 			ID:   "user",
 			Role: RoleUser,
 			Parts: []UIPart{
-				{Type: "text", Text: "Look at this"},
-				{Type: "file", MediaType: "image/png", Filename: "chart.png", URL: "https://example.test/chart.png"},
+				{Type: "text", Text: "Look at this", ProviderMetadata: ProviderMetadata{"mock": map[string]any{"text": true}}},
+				{Type: "file", MediaType: "image/png", Filename: "chart.png", URL: "https://example.test/chart.png", ProviderMetadata: ProviderMetadata{"mock": map[string]any{"file": true}}},
 				{Type: "data-note", Data: "converted"},
 			},
 		},
@@ -323,12 +323,19 @@ func TestConvertToModelMessagesConvertsSystemAndUserParts(t *testing.T) {
 	if got[1].Role != RoleUser || len(got[1].Content) != 3 {
 		t.Fatalf("unexpected user message: %#v", got[1])
 	}
+	text, ok := got[1].Content[0].(TextPart)
+	if !ok || !reflect.DeepEqual(text.ProviderMetadata, ProviderMetadata{"mock": map[string]any{"text": true}}) {
+		t.Fatalf("unexpected user text metadata: %#v", got[1].Content[0])
+	}
 	file, ok := got[1].Content[1].(FilePart)
 	if !ok {
 		t.Fatalf("expected file part, got %#v", got[1].Content[1])
 	}
 	if file.Data.Type != "url" || file.Data.URL != "https://example.test/chart.png" || file.MediaType != "image/png" {
 		t.Fatalf("unexpected file part: %#v", file)
+	}
+	if !reflect.DeepEqual(file.ProviderMetadata, ProviderMetadata{"mock": map[string]any{"file": true}}) {
+		t.Fatalf("unexpected file metadata: %#v", file.ProviderMetadata)
 	}
 }
 
@@ -426,5 +433,27 @@ func TestAppendResponseMessagesAppliesToolResults(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got[0].Parts[0].Output, map[string]any{"forecast": "sunny"}) {
 		t.Fatalf("unexpected output: %#v", got[0].Parts[0].Output)
+	}
+}
+
+func TestAppendResponseMessagesPreservesTextAndFileProviderMetadata(t *testing.T) {
+	metadata := ProviderMetadata{"googleVertex": map[string]any{"thoughtSignature": "sig-1"}}
+	got := AppendResponseMessages(nil, []Message{
+		{
+			Role: RoleAssistant,
+			Content: []Part{
+				TextPart{Text: "hello", ProviderMetadata: metadata},
+				FilePart{MediaType: "text/plain", Filename: "note.txt", Data: FileData{Type: "url", URL: "https://example.test/note.txt"}, ProviderMetadata: metadata},
+			},
+		},
+	})
+	if len(got) != 1 || len(got[0].Parts) != 2 {
+		t.Fatalf("unexpected messages: %#v", got)
+	}
+	if !reflect.DeepEqual(got[0].Parts[0].ProviderMetadata, metadata) {
+		t.Fatalf("unexpected text metadata: %#v", got[0].Parts[0].ProviderMetadata)
+	}
+	if !reflect.DeepEqual(got[0].Parts[1].ProviderMetadata, metadata) {
+		t.Fatalf("unexpected file metadata: %#v", got[0].Parts[1].ProviderMetadata)
 	}
 }

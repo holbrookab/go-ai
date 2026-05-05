@@ -183,6 +183,44 @@ func TestStreamTextAppliesTransformsToCanonicalText(t *testing.T) {
 	}
 }
 
+func TestStreamTextPreservesTextDeltaProviderMetadata(t *testing.T) {
+	metadata := ProviderMetadata{"googleVertex": map[string]any{"thoughtSignature": "sig-1"}}
+	model := &sequenceModel{stream: func(opts LanguageModelCallOptions) (*LanguageModelStreamResult, error) {
+		ch := make(chan StreamPart, 4)
+		ch <- StreamPart{Type: "text-delta", TextDelta: "Hello", ProviderMetadata: metadata}
+		ch <- StreamPart{Type: "text-delta", TextDelta: ", world"}
+		ch <- StreamPart{Type: "finish", FinishReason: FinishReason{Unified: FinishStop}}
+		close(ch)
+		return &LanguageModelStreamResult{Stream: ch}, nil
+	}}
+
+	result, err := StreamText(context.Background(), StreamTextOptions{
+		GenerateTextOptions: GenerateTextOptions{
+			Model:  model,
+			Prompt: "hello",
+		},
+	})
+	if err != nil {
+		t.Fatalf("StreamText failed: %v", err)
+	}
+	for range result.Stream {
+	}
+	if len(result.Content) != 1 {
+		t.Fatalf("expected one content part, got %#v", result.Content)
+	}
+	text, ok := result.Content[0].(TextPart)
+	if !ok {
+		t.Fatalf("expected text part, got %#v", result.Content[0])
+	}
+	if text.Text != "Hello, world" {
+		t.Fatalf("unexpected text: %q", text.Text)
+	}
+	namespace, ok := text.ProviderMetadata["googleVertex"].(map[string]any)
+	if !ok || namespace["thoughtSignature"] != "sig-1" {
+		t.Fatalf("unexpected text metadata: %#v", text.ProviderMetadata)
+	}
+}
+
 func TestStreamTextEmitsAbortOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	model := NewMockLanguageModel("stream-abort")

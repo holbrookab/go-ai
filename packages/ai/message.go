@@ -44,8 +44,9 @@ type Part interface {
 }
 
 type TextPart struct {
-	Text            string
-	ProviderOptions ProviderOptions
+	Text             string
+	ProviderMetadata ProviderMetadata
+	ProviderOptions  ProviderOptions
 }
 
 func (TextPart) part()            {}
@@ -61,10 +62,11 @@ type FileData struct {
 }
 
 type FilePart struct {
-	Data            FileData
-	MediaType       string
-	Filename        string
-	ProviderOptions ProviderOptions
+	Data             FileData
+	MediaType        string
+	Filename         string
+	ProviderMetadata ProviderMetadata
+	ProviderOptions  ProviderOptions
 }
 
 func (FilePart) part()            {}
